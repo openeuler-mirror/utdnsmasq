@@ -4,107 +4,145 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+pub mod log;
+pub mod option;
+use log::*;
+use option::*;
 use signal_hook::consts::signal::*;
-use std::ffi::CString;
-use std::net::{SocketAddr};
-use std::os::raw::{c_char, c_int};
+use signal_hook::iterator::Signals;
+use std::env;
+use std::net::Ipv4Addr;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
-use std::{env, ptr};
-
-#[derive(Debug)]
-struct Iname {
-    name: Option<String>,
-    addr: SocketAddr,
-    found: bool,
-    next: Option<Box<Iname>>,
-}
+use std::thread;
 
 // 全局标志变量，使用 AtomicBool 来保证线程安全
-static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
-static SIGHUP_RECEIVED: AtomicBool = AtomicBool::new(false);
-static SIGUSR1_RECEIVED: AtomicBool = AtomicBool::new(false);
-static SIGUSR2_RECEIVED: AtomicBool = AtomicBool::new(false);
+static SIGHUP_FLAG: AtomicBool = AtomicBool::new(true);
+static SIGUSR1_FLAG: AtomicBool = AtomicBool::new(false);
+static SIGUSR2_FLAG: AtomicBool = AtomicBool::new(false);
+static SIGTERM_FLAG: AtomicBool = AtomicBool::new(false);
 
-// 信号处理函数
-fn sig_handler(sig: i32) {
-    match sig {
-        SIGTERM => {
-            SIGTERM_RECEIVED.store(true, Ordering::SeqCst);
+fn sig_handler(mut signals: Signals) {
+    for sig in signals.forever() {
+        match sig {
+            SIGTERM => SIGTERM_FLAG.store(true, Ordering::SeqCst),
+            SIGHUP => SIGHUP_FLAG.store(true, Ordering::SeqCst),
+            SIGUSR1 => SIGUSR1_FLAG.store(true, Ordering::SeqCst),
+            SIGUSR2 => SIGUSR2_FLAG.store(true, Ordering::SeqCst),
+            _ => {}
         }
-        SIGHUP => {
-            SIGHUP_RECEIVED.store(true, Ordering::SeqCst);
-        }
-        SIGUSR1 => {
-            SIGUSR1_RECEIVED.store(true, Ordering::SeqCst);
-        }
-        SIGUSR2 => {
-            SIGUSR2_RECEIVED.store(true, Ordering::SeqCst);
-        }
-        _ => {}
     }
 }
 
 // 定义常量
-const CACHESIZ: usize = 1024; // 缓存大小默认值
-const NAMESERVER_PORT: u16 = 53; // 名称服务器端口默认值
-const RUNFILE: &str = "/var/run/dnsmasq.pid"; // PID 文件默认路径
-const CHUSER: &str = "dnsmasq"; // 默认用户名
-const CHGRP: &str = "dnsmasq"; // 默认组名
+const MAXDNAME: usize = 256; // 域名最大长度
+const PACKETSZ: usize = 512; // 典型的 DNS 数据包大小
+const RRFIXEDSZ: usize = 10; // 资源记录的固定大小
+const CACHESIZ: usize = 150; // 缓存大小默认值
+const NAMESERVER_PORT: u16 = 53; // Default DNS server port
+const RUNFILE: &str = "/var/run/dnsmasq.pid";
+const CHUSER: &str = "root"; // 默认用户名
+const CHGRP: &str = "nogroup"; // 默认组名
 
-fn start(_argc: usize, _argv: *mut *mut c_char) -> usize {
-    let _int_err_string: String = String::new(); // 错误信息字符串
-    let _cachesize: usize = CACHESIZ; // 缓存大小，默认值为 CACHESIZ
-    let _port: u16 = NAMESERVER_PORT; // 名称服务器端口，默认为 NAMESERVER_PORT
-    let _query_port: u16 = 0; // 查询端口，初始值为0
-    let _first_loop: bool = true; // 标记是否首次运行，1 表示是
-    let _local_ttl: u32 = 0; // 本地缓存 TTL，初始值为 0
-    let _options: u32 = 0; // 选项标志位
-    let _runfile: String = RUNFILE.to_string(); // 进程 PID 文件路径，默认为 RUNFILE
-                                               // 时间戳相关变量
-    let _resolv_changed: SystemTime = SystemTime::now();
-    let _now: SystemTime = SystemTime::now();
-    let _last: SystemTime = SystemTime::now();
-    // 网络接口相关信息
-    let _iface: String = String::new();
-    let _interfaces: String = String::new();
+fn start(argc: usize, args: Vec<String>) -> usize {
+    let file_logger = Logger::new(Some("/var/log/utdnsmasq.log".to_string()));
+    let mut cachesize: usize = CACHESIZ; // 缓存大小，默认值为 CACHESIZ
+    let mut port: u16 = NAMESERVER_PORT; // 名称服务器端口，默认为 NAMESERVER_PORT
+    let mut query_port: i32 = 0; // 查询端口，初始值为0
+    let first_loop: bool = true; // 标记是否首次运行，1 表示是
+    let mut local_ttl: u64 = 0; // 本地缓存 TTL，初始值为 0
+    let runfile: &str = RUNFILE; // 进程 PID 文件路径，默认为 RUNFILE
+                                 // 时间戳相关变量
+    let resolv_changed: u64 = 0;
+    let now: u64 = 0;
+    let last: u64 = 0;
     // 邮件交换相关变量
-    let _mxname: String = String::new();
-    let _mxtarget: String = String::new();
-    let _lease_file: String = String::new(); // 租约文件路径
-    let _addn_hosts: String = String::new(); // 额外主机文件路径
-    let _domain_suffix: String = String::new(); // 域名后缀
-    let _username: String = CHUSER.to_string(); // 用户名，默认值为 CHUSER
-    let _groupname: String = CHGRP.to_string(); // 组名，默认值为 CHGRP
-    let _if_names: *mut Iname = std::ptr::null_mut(); // 用于存储接口名称
-    let _if_addrs: *mut Iname = std::ptr::null_mut(); // 用于存储接口地址
-    let _if_except: *mut Iname = std::ptr::null_mut(); // 用于存储例外情况
-    let _if_tmp: *mut Iname = std::ptr::null_mut(); // 作为临时变量使用
-    sig_handler(0);
+    let mut resolv = Resolv::default();
+    let mut dhcp: Option<&mut DhcpContext> = None;
+    let mut dhcp_conf: Option<&mut Vec<DhcpConfig>> = None;
+    let mut dhcp_opts: Option<&mut Vec<DhcpOpt>> = None;
+    let mxname: Option<&mut String> = None;
+    let mxtarget: Option<&mut String> = None;
+    let mut lease_file: Option<&mut String> = None; // 租约文件路径
+    let mut addn_hosts: Option<&mut String> = None; // 额外主机文件路径
+    let domain_suffix: Option<String> = None; // 域名后缀
+    let mut username: &str = CHUSER; // 用户名，默认值为 CHUSER
+    let mut groupname: &str = CHGRP; // 组名，默认值为 CHGRP
+    let if_names: Option<&mut Vec<Iname>> = None; // 用于存储接口名称
+    let if_addrs: Option<&mut Vec<Iname>> = None; // 用于存储接口地址
+    let if_except: Option<&mut Vec<Iname>> = None; // 用于存储例外情况
+    let bogus_addr: Option<&mut BogusAddr> = None;
+    let dhcp_sname: Option<&mut String> = None;
+    let dhcp_file: Option<&mut String> = Default::default();
+    let serv_addrs: Option<&mut Vec<Server>> = None;
+    let mut dnamebuff = vec![0u8; MAXDNAME];
+    let packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
+    let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
+    let leasefd: i32 = 0;
+
+    let signals = Signals::new(&[SIGUSR1, SIGUSR2, SIGHUP, SIGTERM]).unwrap();
+    let signals_handle = thread::spawn(move || {
+        sig_handler(signals);
+    });
+
+    let options = read_opts(
+        argc,
+        args,
+        &mut dnamebuff,
+        Some(&mut resolv),
+        mxname,
+        mxtarget,
+        &lease_file,
+        &mut username,
+        &mut groupname,
+        domain_suffix,
+        runfile,
+        if_names,
+        if_addrs,
+        if_except,
+        bogus_addr,
+        serv_addrs,
+        Some(&mut cachesize),
+        Some(&mut port),
+        Some(&mut query_port),
+        Some(&mut local_ttl),
+        addn_hosts,
+        &dhcp,
+        dhcp_conf,
+        dhcp_opts,
+        dhcp_file,
+        dhcp_sname,
+        dhcp_next_server,
+    );
+    if lease_file.is_none() {
+        let mut lease_files = String::from("/var/lib/misc/dnsmasq.leases");
+        lease_file = Some(&mut lease_files);
+    } else if dhcp.is_none() {
+        file_logger.error("********* dhcp-lease option set, but not dhcp-range.");
+        file_logger.error("********* Are you trying to use the obsolete ISC dhcpd integration?");
+        file_logger.error("********* Please configure the dnsmasq integrated DHCP server by using");
+        file_logger.error("********* the \"dhcp-range\" option, and remove any other DHCP server.");
+    }
+    // 退出前加入信号处理线程
+    // signals_handle.join().unwrap();
     0
 }
 
 fn main() {
-    // 创建一个 Vec<*mut libc::c_char> 类型的向量 args
-    let mut args: Vec<*mut c_char> = Vec::new();
+    // 创建一个 Vec<String> 类型的向量 args
+    let mut args: Vec<String> = Vec::new();
 
     // 遍历 std::env::args() 获取所有命令行参数
     for arg in env::args() {
-        // 将每个参数转换为 CString，并获取其原始指针
-        let cstring = CString::new(arg).expect("Failed to convert to CString");
         // 获取原始指针，并存储到 args 向量中
-        args.push(cstring.into_raw());
+        args.push(arg);
     }
 
-    // 在 args 向量末尾添加一个空指针 null_mut()，用于表示参数列表的结束
-    args.push(ptr::null_mut());
-
     // 参数数量（减一：去掉程序名）
-    let argc = (args.len() as c_int) - 1;
+    let argc = args.len() - 1;
 
     // 调用 start 函数，传入参数数量和参数指针数组
-    let exit_code = start(argc.try_into().unwrap(), args.as_mut_ptr()) as i32;
+    let exit_code = start(argc, args);
 
-    exit(exit_code);
+    exit(exit_code.try_into().unwrap());
 }
