@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+pub mod cache;
+pub mod forward_init;
 pub mod log;
 pub mod option;
+use cache::*;
+use forward_init::*;
 use if_addrs::{IfAddr, Ifv4Addr, Ifv6Addr};
 use log::*;
 use option::*;
@@ -15,7 +19,9 @@ use std::collections::HashMap;
 use std::env;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 use std::process::exit;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
@@ -132,6 +138,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let dhcp_file: Option<&mut String> = Default::default();
     let serv_addrs: Option<&mut Vec<Server>> = None;
     let mut dnamebuff = vec![0u8; MAXDNAME];
+    print!("{:?}\n", dnamebuff);
     let packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
     let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
     let leasefd: i32 = 0;
@@ -192,6 +199,27 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             return 1;
         }
     }
+
+    for if_addrs in interfaces.if_addrs {
+        if if_addrs.1.is_some() {
+            if Ipv4Addr::from_str(&(if_addrs.1).expect("REASON").to_string()).is_ok()
+                || Ipv6Addr::from_str(&(if_addrs.1).expect("REASON").to_string()).is_ok()
+            {
+                match if_addrs.1 {
+                    Some(IpAddr::V4(v4)) => {
+                        dnamebuff = (if_addrs.1).expect("REASON").to_string().into()
+                    }
+                    Some(IpAddr::V6(v6)) => {
+                        dnamebuff = (if_addrs.1).expect("REASON").to_string().into()
+                    }
+                    _ => (),
+                }
+            }
+        }
+    }
+
+    forward_init(true);
+    Cache::new(cachesize, options & 4);
 
     // 退出前加入信号处理线程
     // signals_handle.join().unwrap();
