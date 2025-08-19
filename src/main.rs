@@ -4,301 +4,325 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-pub mod cache;
-pub mod forward_init;
-pub mod lease;
-pub mod log;
-pub mod option;
-use cache::*;
-use forward_init::*;
-use if_addrs::{IfAddr, Ifv4Addr, Ifv6Addr};
-use lease::*;
-use libc::fork;
-use log::*;
-use option::*;
-use signal_hook::consts::signal::*;
-use signal_hook::iterator::Signals;
-use std::collections::HashMap;
-use std::fs::File;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
-use std::path::Path;
-use std::process::exit;
-use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::{env, fs, thread};
-
-// 全局标志变量，使用 AtomicBool 来保证线程安全
-static SIGHUP_FLAG: AtomicBool = AtomicBool::new(true);
-static SIGUSR1_FLAG: AtomicBool = AtomicBool::new(false);
-static SIGUSR2_FLAG: AtomicBool = AtomicBool::new(false);
-static SIGTERM_FLAG: AtomicBool = AtomicBool::new(false);
-
-fn sig_handler(mut signals: Signals) {
-    for sig in signals.forever() {
-        match sig {
-            SIGTERM => SIGTERM_FLAG.store(true, Ordering::SeqCst),
-            SIGHUP => SIGHUP_FLAG.store(true, Ordering::SeqCst),
-            SIGUSR1 => SIGUSR1_FLAG.store(true, Ordering::SeqCst),
-            SIGUSR2 => SIGUSR2_FLAG.store(true, Ordering::SeqCst),
-            _ => {}
-        }
-    }
-}
-
-// 定义常量
-const MAXDNAME: usize = 256; // 域名最大长度
-const PACKETSZ: usize = 512; // 典型的 DNS 数据包大小
-const RRFIXEDSZ: usize = 10; // 资源记录的固定大小
-const CACHESIZ: usize = 1024; // 缓存大小默认值
-const NAMESERVER_PORT: u16 = 53; // Default DNS server port
-const RUNFILE: &str = "/var/run/dnsmasq.pid";
-const CHUSER: &str = "utdnsmasq"; // 默认用户名
-const CHGRP: &str = "utdnsmasq"; // 默认组名
-const OPT_DEBUG: u32 = 64;
-
-#[derive(Debug)]
-struct Interface {
-    name: String,
-    addr: Option<IpAddr>,
-}
-
-#[derive(Debug)]
-struct Passwd {
-    pw_name: String,
-    pw_passwd: String,
-    pw_uid: u32,
-    pw_gid: u32,
-    pw_gecos: String,
-    pw_dir: String,
-    pw_shell: String,
-}
-
-#[derive(Debug)]
-struct Interfaces {
-    if_names: Vec<String>,
-    if_addrs: HashMap<String, Option<IpAddr>>,
-}
-
-impl Interfaces {
-    fn new() -> Self {
-        Interfaces {
-            if_names: Vec::new(),
-            if_addrs: HashMap::new(),
-        }
-    }
-}
-
-fn enumerate_interfaces(
-    interfaces: &mut Interfaces,
-    dhcp: bool, // 控制参数
-    port: u16,  // 配置端口
-) -> Result<(), String> {
-    // 使用 if_addrs 库来枚举网络接口
-    match if_addrs::get_if_addrs() {
-        Ok(ifaces) => {
-            for iface in ifaces {
-                let name = iface.name.clone();
-                let addr = match iface.addr {
-                    IfAddr::V4(Ifv4Addr { ip, .. }) => Some(IpAddr::V4(ip)),
-                    IfAddr::V6(Ifv6Addr { ip, .. }) => Some(IpAddr::V6(ip)),
-                };
-
-                // 存储接口名称和地址
-                interfaces.if_names.push(name.clone());
-                interfaces.if_addrs.insert(name, addr);
-            }
-        }
-        Err(e) => {
-            return Err(format!("Failed to enumerate network interfaces: {}", e));
-        }
-    }
-
-    if dhcp {
-        println!("DHCP is enabled, configuring port: {}", port);
-    }
-
-    Ok(())
-}
-
-fn start(argc: usize, args: Vec<String>) -> usize {
-    let file_logger = Logger::new(Some("/var/log/utdnsmasq.log".to_string()));
-    let mut cachesize: usize = CACHESIZ; // 缓存大小，默认值为 CACHESIZ
-    let mut port: u16 = NAMESERVER_PORT; // 名称服务器端口，默认为 NAMESERVER_PORT
-    let mut query_port: i32 = 0; // 查询端口，初始值为0
-    let first_loop: bool = true;
-    let mut local_ttl: u64 = 0; // 本地缓存 TTL，初始值为 0
-    let runfile: &str = RUNFILE; // 进程 PID 文件路径，默认为 RUNFILE
-                                 // 时间戳相关变量
-    let resolv_changed: u64 = 0;
-    let now: u64 = 0;
-    let last: u64 = 0;
-    // 邮件交换相关变量
-    let mut resolv = Resolv::default();
-    let mut dhcp: Option<Box<DhcpContext>> = None;
-    let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
-    let mut dhcp_opts: Option<Box<DhcpOpt>> = None;
-    let mxname: Option<&mut String> = None;
-    let mxtarget: Option<&mut String> = None;
-    let mut lease_file: Option<&mut String> = None; // 租约文件路径
-    let mut addn_hosts: Option<&mut String> = None; // 额外主机文件路径
-    let domain_suffix: Option<String> = None; // 域名后缀
-    let mut username: &str = CHUSER; // 用户名，默认值为 CHUSER
-    let mut groupname: &str = CHGRP; // 组名，默认值为 CHGRP
-    let mut if_names: Option<&mut Vec<Iname>> = None; // 用于存储接口名称
-    let mut if_addrs: Option<&mut Vec<Iname>> = None; // 用于存储接口地址
-    let if_except: Option<&mut Vec<Iname>> = None; // 用于存储例外情况
-    let bogus_addr: Option<&mut BogusAddr> = None;
-    let dhcp_sname: Option<&mut String> = None;
-    let dhcp_file: Option<&mut String> = Default::default();
-    let serv_addrs: Option<&mut Vec<Server>> = None;
-    let mut dnamebuff = vec![0u8; MAXDNAME];
-    let packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
-    let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
-    let leasefd: i32 = 0;
-
-    let signals = Signals::new(&[SIGUSR1, SIGUSR2, SIGHUP, SIGTERM]).unwrap();
-    let signals_handle = thread::spawn(move || {
-        sig_handler(signals);
-    });
-
-    let options = read_opts(
-        argc,
-        args,
-        &mut dnamebuff,
-        Some(&mut resolv),
-        mxname,
-        mxtarget,
-        &lease_file,
-        &mut username,
-        &mut groupname,
-        domain_suffix,
-        runfile,
-        &if_names,
-        &if_addrs,
-        &if_except,
-        bogus_addr,
-        serv_addrs,
-        Some(&mut cachesize),
-        Some(&mut port),
-        Some(&mut query_port),
-        Some(&mut local_ttl),
-        addn_hosts,
-        &dhcp,
-        dhcp_conf,
-        dhcp_opts,
-        dhcp_file,
-        dhcp_sname,
-        dhcp_next_server,
-    );
-    if lease_file.is_none() {
-        let mut lease_files = String::from("/var/lib/misc/dnsmasq.leases");
-        lease_file = Some(&mut lease_files);
-    } else if dhcp.is_none() {
-        file_logger.error("********* dhcp-lease option set, but not dhcp-range.");
-        file_logger.error("********* Are you trying to use the obsolete ISC dhcpd integration?");
-        file_logger.error("********* Please configure the dnsmasq integrated DHCP server by using");
-        file_logger.error("********* the \"dhcp-range\" option, and remove any other DHCP server.");
-    }
-    let mut interfaces = Interfaces::new();
-    let int_err_string = enumerate_interfaces(&mut interfaces, dhcp.is_some(), port);
-    if int_err_string.is_err() {
-        file_logger.error("********* FAILED to start up");
-        return 1;
-    }
-
-    for if_names in interfaces.if_names {
-        if if_names.is_empty() {
-            file_logger.error("********* Unknown interface name found");
-            return 1;
-        }
-    }
-
-    for if_addrs in interfaces.if_addrs {
-        if if_addrs.1.is_some() {
-            if Ipv4Addr::from_str(&(if_addrs.1).expect("REASON").to_string()).is_ok()
-                || Ipv6Addr::from_str(&(if_addrs.1).expect("REASON").to_string()).is_ok()
-            {
-                match if_addrs.1 {
-                    Some(IpAddr::V4(v4)) => {
-                        dnamebuff = (if_addrs.1).expect("REASON").to_string().into()
-                    }
-                    Some(IpAddr::V6(v6)) => {
-                        dnamebuff = (if_addrs.1).expect("REASON").to_string().into()
-                    }
-                    _ => (),
-                }
-            }
-        }
-    }
-
-    forward_init(true);
-    Cache::new(cachesize, options & 4);
-
-    if dhcp.is_some() {
-        let packet_path = "/usr/include/netpacket/packet.h";
-        let bpf_path = "/usr/include/net/bpf.h";
-        if file_exists(packet_path) && file_exists(bpf_path) {
-            let mut current = &dhcp;
-            while let Some(ctx) = current {
-                if ctx.iface.is_empty() {
-                    // 如果 iface 为空字符串，执行后续代码块
-                    file_logger
-                        .error("********* No suitable interface for DHCP service at address");
-                    // leasefd = lease_init(lease_file, domain_suffix, dnamebuff, packet, time(NULL), dhcp_configs);
-                    // lease_update_dns(1);
-                    return 1;
-                }
-
-                // 移动到下一个节点
-                current = &ctx.next;
-            }
-        } else {
-            file_logger.error("********* no DHCP support available on this OS.");
-        }
-    }
-
-    if (options & OPT_DEBUG) == 0 {
-        let pidfile: Option<File> = match File::create("pidfile.txt") {
-            Ok(file) => Some(file),
-            Err(_) => None,
-        };
-        let i: i32 = 0;
-        // if fork() != 0{
-        //     return 0;
-        // }
-    }
-    // 退出前加入信号处理线程
-    // signals_handle.join().unwrap();
-    0
-}
-
-fn file_exists<P: AsRef<Path>>(path: P) -> bool {
-    let dir = path.as_ref().parent().unwrap_or(Path::new("."));
-    let file_name = path.as_ref().file_name().unwrap_or_default();
-
-    fs::read_dir(dir)
-        .expect("REASON")
-        .flatten()
-        .any(|entry| entry.file_name() == file_name)
-}
-
-fn main() {
-    // 创建一个 Vec<String> 类型的向量 args
-    let mut args: Vec<String> = Vec::new();
-
-    // 遍历 std::env::args() 获取所有命令行参数
-    for arg in env::args() {
-        // 获取原始指针，并存储到 args 向量中
-        args.push(arg);
-    }
-
-    // 参数数量（减一：去掉程序名）
-    let argc = args.len() - 1;
-
-    // 调用 start 函数，传入参数数量和参数指针数组
-    let exit_code = start(argc, args);
-
-    exit(exit_code.try_into().unwrap());
-}
+ pub mod cache;
+ pub mod forward_init;
+ pub mod lease;
+ pub mod log;
+ pub mod option;
+ use cache::*;
+ use forward_init::*;
+ use if_addrs::{IfAddr, Ifv4Addr, Ifv6Addr};
+ use lease::*;
+ use libc::fork;
+ use log::*;
+ use option::*;
+ use signal_hook::consts::signal::*;
+ use signal_hook::iterator::Signals;
+ use std::collections::HashMap;
+ use std::fs::File;
+ use std::net::IpAddr;
+ use std::net::Ipv4Addr;
+ use std::net::Ipv6Addr;
+ use std::path::Path;
+ use std::process::exit;
+ use std::str::FromStr;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::{env, fs, thread};
+ 
+ // 全局标志变量，使用 AtomicBool 来保证线程安全
+ static SIGHUP_FLAG: AtomicBool = AtomicBool::new(true);
+ static SIGUSR1_FLAG: AtomicBool = AtomicBool::new(false);
+ static SIGUSR2_FLAG: AtomicBool = AtomicBool::new(false);
+ static SIGTERM_FLAG: AtomicBool = AtomicBool::new(false);
+ 
+ fn sig_handler(mut signals: Signals) {
+     // 处理信号，将信号标志设置为 true
+     for sig in signals.forever() {
+         match sig {
+             SIGTERM => SIGTERM_FLAG.store(true, Ordering::SeqCst),
+             SIGHUP => SIGHUP_FLAG.store(true, Ordering::SeqCst),
+             SIGUSR1 => SIGUSR1_FLAG.store(true, Ordering::SeqCst),
+             SIGUSR2 => SIGUSR2_FLAG.store(true, Ordering::SeqCst),
+             _ => {}
+         }
+     }
+ }
+ 
+ // 定义常量
+ const MAXDNAME: usize = 256; // 域名最大长度
+ const PACKETSZ: usize = 512; // 典型的 DNS 数据包大小
+ const RRFIXEDSZ: usize = 10; // 资源记录的固定大小
+ const CACHESIZ: usize = 1024; // 缓存大小默认值
+ const NAMESERVER_PORT: u16 = 53; // Default DNS server port
+ const RUNFILE: &str = "/var/run/dnsmasq.pid";
+ const CHUSER: &str = "utdnsmasq"; // 默认用户名
+ const CHGRP: &str = "utdnsmasq"; // 默认组名
+ const OPT_DEBUG: u32 = 64;
+ 
+ #[derive(Debug)]
+ struct Interface {
+     name: String,
+     addr: Option<IpAddr>,
+ }
+ 
+ #[derive(Debug)]
+ struct Passwd {
+     pw_name: String,
+     pw_passwd: String,
+     pw_uid: u32,
+     pw_gid: u32,
+     pw_gecos: String,
+     pw_dir: String,
+     pw_shell: String,
+ }
+ 
+ // 存储接口名称和地址
+ #[derive(Debug)]
+ struct Interfaces {
+     if_names: Vec<String>,
+     if_addrs: HashMap<String, Option<IpAddr>>,
+ }
+ 
+ impl Interfaces {
+     fn new() -> Self {
+         Interfaces {
+             if_names: Vec::new(),
+             if_addrs: HashMap::new(),
+         }
+     }
+ }
+ 
+ fn enumerate_interfaces(
+     interfaces: &mut Interfaces,
+     dhcp: bool, // 控制参数
+     port: u16,  // 配置端口
+ ) -> Result<(), String> {
+     /*
+         枚举网络接口，并将结果存储在 interfaces 参数中。
+         如果枚举失败，则返回错误信息。
+         返回一个 Result 类型，其中包含一个 Result 类型，用于表示是否成功枚举网络接口。
+         枚举成功后，会将接口名称和地址存储在 interfaces 参数中。
+         如果dhcp参数为true，则将端口号存储在port参数中。
+     */
+     match if_addrs::get_if_addrs() {
+         Ok(ifaces) => {
+             for iface in ifaces {
+                 let name = iface.name.clone();
+                 let addr = match iface.addr {
+                     IfAddr::V4(Ifv4Addr { ip, .. }) => Some(IpAddr::V4(ip)),
+                     IfAddr::V6(Ifv6Addr { ip, .. }) => Some(IpAddr::V6(ip)),
+                 };
+ 
+                 // 存储接口名称和地址
+                 interfaces.if_names.push(name.clone());
+                 interfaces.if_addrs.insert(name, addr);
+             }
+         }
+         Err(e) => {
+             return Err(format!("Failed to enumerate network interfaces: {}", e));
+         }
+     }
+ 
+     if dhcp {
+         println!("DHCP is enabled, configuring port: {}", port);
+     }
+ 
+     Ok(())
+ }
+ 
+ fn start(argc: usize, args: Vec<String>) -> usize {
+     /*
+        主函数，用于启动 dnsmasq 服务器
+        参数：argc: 命令行参数个数
+        args: 命令行参数向量
+        返回值：0 表示成功，其他值表示失败
+     */
+     let file_logger = Logger::new(Some("/var/log/utdnsmasq.log".to_string()));
+     let mut cachesize: usize = CACHESIZ; // 缓存大小，默认值为 CACHESIZ
+     let mut port: u16 = NAMESERVER_PORT; // 名称服务器端口，默认为 NAMESERVER_PORT
+     let mut query_port: i32 = 0; // 查询端口，初始值为0
+     let first_loop: bool = true;
+     let mut local_ttl: u64 = 0; // 本地缓存 TTL，初始值为 0
+     let runfile: &str = RUNFILE; // 进程 PID 文件路径，默认为 RUNFILE
+                                  // 时间戳相关变量
+     let resolv_changed: u64 = 0;
+     let now: u64 = 0;
+     let last: u64 = 0;
+     // 邮件交换相关变量
+     let mut resolv = Resolv::default();
+     let mut dhcp: Option<Box<DhcpContext>> = None;
+     let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
+     let mut dhcp_opts: Option<Box<DhcpOpt>> = None;
+     let mxname: Option<&mut String> = None;
+     let mxtarget: Option<&mut String> = None;
+     let mut lease_file: Option<&mut String> = None; // 租约文件路径
+     let mut addn_hosts: Option<&mut String> = None; // 额外主机文件路径
+     let domain_suffix: Option<String> = None; // 域名后缀
+     let mut username: &str = CHUSER; // 用户名，默认值为 CHUSER
+     let mut groupname: &str = CHGRP; // 组名，默认值为 CHGRP
+     let mut if_names: Option<&mut Vec<Iname>> = None; // 用于存储接口名称
+     let mut if_addrs: Option<&mut Vec<Iname>> = None; // 用于存储接口地址
+     let if_except: Option<&mut Vec<Iname>> = None; // 用于存储例外情况
+     let bogus_addr: Option<&mut BogusAddr> = None;
+     let dhcp_sname: Option<&mut String> = None;
+     let dhcp_file: Option<&mut String> = Default::default();
+     let serv_addrs: Option<&mut Vec<Server>> = None;
+     let mut dnamebuff = vec![0u8; MAXDNAME];
+     let packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
+     let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
+     let leasefd: i32 = 0;
+ 
+     let signals = Signals::new(&[SIGUSR1, SIGUSR2, SIGHUP, SIGTERM]).unwrap();
+     let signals_handle = thread::spawn(move || {
+         sig_handler(signals);
+     });
+ 
+     let options = read_opts(
+         argc,
+         args,
+         &mut dnamebuff,
+         Some(&mut resolv),
+         mxname,
+         mxtarget,
+         &lease_file,
+         &mut username,
+         &mut groupname,
+         domain_suffix,
+         runfile,
+         &if_names,
+         &if_addrs,
+         &if_except,
+         bogus_addr,
+         serv_addrs,
+         Some(&mut cachesize),
+         Some(&mut port),
+         Some(&mut query_port),
+         Some(&mut local_ttl),
+         addn_hosts,
+         &dhcp,
+         dhcp_conf,
+         dhcp_opts,
+         dhcp_file,
+         dhcp_sname,
+         dhcp_next_server,
+     );
+     if lease_file.is_none() {
+         let mut lease_files = String::from("/var/lib/misc/dnsmasq.leases");
+         lease_file = Some(&mut lease_files);
+     } else if dhcp.is_none() {
+         file_logger.error("********* dhcp-lease option set, but not dhcp-range.");
+         file_logger.error("********* Are you trying to use the obsolete ISC dhcpd integration?");
+         file_logger.error("********* Please configure the dnsmasq integrated DHCP server by using");
+         file_logger.error("********* the \"dhcp-range\" option, and remove any other DHCP server.");
+     }
+     let mut interfaces = Interfaces::new();
+     let int_err_string = enumerate_interfaces(&mut interfaces, dhcp.is_some(), port);
+     if int_err_string.is_err() {
+         file_logger.error("********* FAILED to start up");
+         return 1;
+     }
+ 
+     for if_names in interfaces.if_names {
+         if if_names.is_empty() {
+             file_logger.error("********* Unknown interface name found");
+             return 1;
+         }
+     }
+ 
+     // 检查每个地址是否为有效的v4 v6地址
+     for if_addrs in interfaces.if_addrs {
+         if if_addrs.1.is_some() {
+             if Ipv4Addr::from_str(&(if_addrs.1).expect("REASON").to_string()).is_ok()
+                 || Ipv6Addr::from_str(&(if_addrs.1).expect("REASON").to_string()).is_ok()
+             {
+                 match if_addrs.1 {
+                     Some(IpAddr::V4(v4)) => {
+                         dnamebuff = (if_addrs.1).expect("REASON").to_string().into()
+                     }
+                     Some(IpAddr::V6(v6)) => {
+                         dnamebuff = (if_addrs.1).expect("REASON").to_string().into()
+                     }
+                     _ => (),
+                 }
+             }
+         }
+     }
+ 
+     forward_init(true);
+     Cache::new(cachesize, options & 4);
+ 
+     // 检查DHCP配置并验证必要的文件是否存在
+     if dhcp.is_some() {
+         let packet_path = "/usr/include/netpacket/packet.h";
+         let bpf_path = "/usr/include/net/bpf.h";
+         if file_exists(packet_path) && file_exists(bpf_path) {
+             let mut current = &dhcp;
+             while let Some(ctx) = current {
+                 if ctx.iface.is_empty() {
+                     // 如果 iface 为空字符串，执行后续代码块
+                     file_logger
+                         .error("********* No suitable interface for DHCP service at address");
+                     // leasefd = lease_init(lease_file, domain_suffix, dnamebuff, packet, time(NULL), dhcp_configs);
+                     // lease_update_dns(1);
+                     return 1;
+                 }
+ 
+                 // 移动到下一个节点
+                 current = &ctx.next;
+             }
+         } else {
+             file_logger.error("********* no DHCP support available on this OS.");
+         }
+     }
+ 
+     if (options & OPT_DEBUG) == 0 {
+         let pidfile: Option<File> = match File::create("pidfile.txt") {
+             Ok(file) => Some(file),
+             Err(_) => None,
+         };
+         let i: i32 = 0;
+         // if fork() != 0{
+         //     return 0;
+         // }
+     }
+     // 退出前加入信号处理线程
+     // signals_handle.join().unwrap();
+     0
+ }
+ 
+ fn file_exists<P: AsRef<Path>>(path: P) -> bool {
+     /*
+         判断文件是否存在
+         参数：文件路径
+         返回值：文件是否存在
+         注：如果文件不存在，返回 false
+         注：如果文件存在，返回 true
+     */
+     let dir = path.as_ref().parent().unwrap_or(Path::new("."));
+     let file_name = path.as_ref().file_name().unwrap_or_default();
+ 
+     fs::read_dir(dir)
+         .expect("REASON")
+         .flatten()
+         .any(|entry| entry.file_name() == file_name)
+ }
+ 
+ fn main() {
+     // 创建一个 Vec<String> 类型的向量 args
+     let mut args: Vec<String> = Vec::new();
+ 
+     // 遍历 std::env::args() 获取所有命令行参数
+     for arg in env::args() {
+         // 获取原始指针，并存储到 args 向量中
+         args.push(arg);
+     }
+ 
+     // 参数数量（减一：去掉程序名）
+     let argc = args.len() - 1;
+ 
+     // 调用 start 函数，传入参数数量和参数指针数组
+     let exit_code = start(argc, args);
+ 
+     exit(exit_code.try_into().unwrap());
+ }
+ 
