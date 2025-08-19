@@ -47,6 +47,7 @@ pub struct Crec {
     name: Name,
 }
 
+#[derive(Debug)]
 pub struct Cache {
     cache_size: usize,
     cache_head: Option<*mut Crec>,
@@ -105,7 +106,6 @@ impl Cache {
         }
 
         cache.hash_table = vec![None; cache.hash_size];
-
         cache
     }
 
