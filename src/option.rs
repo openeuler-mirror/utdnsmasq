@@ -124,15 +124,12 @@ pub fn read_opts(
     query_port: Option<&mut i32>,
     local_ttl: Option<&mut u64>,
     addn_hosts: Option<&mut String>,
-    dhcp: &Option<&mut DhcpContext>,
-    dhcp_conf: Option<&mut Vec<DhcpConfig>>,
-    opts: Option<&mut Vec<DhcpOpt>>,
+    dhcp: &Option<Box<DhcpContext>>,
+    dhcp_conf: Option<Box<DhcpConfig>>,
+    opts: Option<Box<DhcpOpt>>,
     dhcp_file: Option<&mut String>,
     dhcp_sname: Option<&mut String>,
     dhcp_next_server: Ipv4Addr,
 ) -> u32 {
-    println!("argc {}\n", argc);
-    println!("argv {:?}\n", argv);
-    println!("dnamebuff {:?}\n", buff);
     0
 }

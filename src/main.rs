@@ -6,24 +6,28 @@
 
 pub mod cache;
 pub mod forward_init;
+pub mod lease;
 pub mod log;
 pub mod option;
 use cache::*;
 use forward_init::*;
 use if_addrs::{IfAddr, Ifv4Addr, Ifv6Addr};
+use lease::*;
+use libc::fork;
 use log::*;
 use option::*;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 use std::collections::HashMap;
-use std::env;
+use std::fs::File;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
+use std::path::Path;
 use std::process::exit;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::{env, fs, thread};
 
 // 全局标志变量，使用 AtomicBool 来保证线程安全
 static SIGHUP_FLAG: AtomicBool = AtomicBool::new(true);
@@ -52,11 +56,23 @@ const NAMESERVER_PORT: u16 = 53; // Default DNS server port
 const RUNFILE: &str = "/var/run/dnsmasq.pid";
 const CHUSER: &str = "utdnsmasq"; // 默认用户名
 const CHGRP: &str = "utdnsmasq"; // 默认组名
+const OPT_DEBUG: u32 = 64;
 
 #[derive(Debug)]
 struct Interface {
     name: String,
     addr: Option<IpAddr>,
+}
+
+#[derive(Debug)]
+struct Passwd {
+    pw_name: String,
+    pw_passwd: String,
+    pw_uid: u32,
+    pw_gid: u32,
+    pw_gecos: String,
+    pw_dir: String,
+    pw_shell: String,
 }
 
 #[derive(Debug)]
@@ -120,9 +136,9 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let last: u64 = 0;
     // 邮件交换相关变量
     let mut resolv = Resolv::default();
-    let mut dhcp: Option<&mut DhcpContext> = None;
-    let mut dhcp_conf: Option<&mut Vec<DhcpConfig>> = None;
-    let mut dhcp_opts: Option<&mut Vec<DhcpOpt>> = None;
+    let mut dhcp: Option<Box<DhcpContext>> = None;
+    let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
+    let mut dhcp_opts: Option<Box<DhcpOpt>> = None;
     let mxname: Option<&mut String> = None;
     let mxtarget: Option<&mut String> = None;
     let mut lease_file: Option<&mut String> = None; // 租约文件路径
@@ -138,7 +154,6 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let dhcp_file: Option<&mut String> = Default::default();
     let serv_addrs: Option<&mut Vec<Server>> = None;
     let mut dnamebuff = vec![0u8; MAXDNAME];
-    print!("{:?}\n", dnamebuff);
     let packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
     let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
     let leasefd: i32 = 0;
@@ -221,9 +236,52 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     forward_init(true);
     Cache::new(cachesize, options & 4);
 
+    if dhcp.is_some() {
+        let packet_path = "/usr/include/netpacket/packet.h";
+        let bpf_path = "/usr/include/net/bpf.h";
+        if file_exists(packet_path) && file_exists(bpf_path) {
+            let mut current = &dhcp;
+            while let Some(ctx) = current {
+                if ctx.iface.is_empty() {
+                    // 如果 iface 为空字符串，执行后续代码块
+                    file_logger
+                        .error("********* No suitable interface for DHCP service at address");
+                    // leasefd = lease_init(lease_file, domain_suffix, dnamebuff, packet, time(NULL), dhcp_configs);
+                    // lease_update_dns(1);
+                    return 1;
+                }
+
+                // 移动到下一个节点
+                current = &ctx.next;
+            }
+        } else {
+            file_logger.error("********* no DHCP support available on this OS.");
+        }
+    }
+
+    if (options & OPT_DEBUG) == 0 {
+        let pidfile: Option<File> = match File::create("pidfile.txt") {
+            Ok(file) => Some(file),
+            Err(_) => None,
+        };
+        let i: i32 = 0;
+        // if fork() != 0{
+        //     return 0;
+        // }
+    }
     // 退出前加入信号处理线程
     // signals_handle.join().unwrap();
     0
+}
+
+fn file_exists<P: AsRef<Path>>(path: P) -> bool {
+    let dir = path.as_ref().parent().unwrap_or(Path::new("."));
+    let file_name = path.as_ref().file_name().unwrap_or_default();
+
+    fs::read_dir(dir)
+        .expect("REASON")
+        .flatten()
+        .any(|entry| entry.file_name() == file_name)
 }
 
 fn main() {
