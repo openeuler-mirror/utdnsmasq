@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+
+type SaFamilyT = u16;
+type InPortT = u16;
+type InAddrT = u32;
+
 #[derive(Default, Clone)]
 pub struct Resolv {
     file: Option<String>,
@@ -14,40 +19,85 @@ pub struct Resolv {
     filename: &'static str,
 }
 
-#[repr(C)]
-#[derive(Debug)]
-pub struct InAddr {
-    s_addr: u32,
-}
-
-#[derive(Debug)]
 pub struct BogusAddr {
     addr: InAddr,
     next: Option<Box<BogusAddr>>,
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct InAddr {
+    pub s_addr: InAddrT,
+}
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct In6Addr {
+    s6_addr: [u8; 16],
+}
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct SockAddr {
+    pub sa_family: SaFamilyT,
+    pub sa_data: [u8; 14],
+}
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct SockAddrIn {
+    pub sin_family: SaFamilyT,
+    pub sin_port: InPortT,
+    pub sin_addr: InAddr,
+    pub sin_zero: [u8; 8],
+}
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct SockAddrIn6 {
+    pub sin6_family: SaFamilyT,
+    pub sin6_port: InPortT,
+    pub sin6_flowinfo: u32,
+    pub sin6_addr: In6Addr,
+    pub sin6_scope_id: u32,
+}
+
+#[cfg(feature = "broken_sockaddr_in6")]
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct MySockAddrIn6 {
+    pub sin6_family: SaFamilyT,
+    pub sin6_port: InPortT,
+    pub sin6_flowinfo: u32,
+    pub sin6_addr: In6Addr,
+    pub sin6_scope_id: u32,
+}
+
+#[repr(C)]
+pub union MySockAddr {
+    pub sa: SockAddr,
+    pub in_: SockAddrIn,
+
+    #[cfg(feature = "broken_sockaddr_in6")]
+    pub in6: MySockAddrIn6,
+
+    #[cfg(all(feature = "ipv6", not(feature = "broken_sockaddr_in6")))]
+    pub in6: SockAddrIn6,
+}
+
 pub struct Iname {
-    name: Option<String>,
-    addr: SocketAddr,
-    found: bool,
-    next: Option<Box<Iname>>,
+    pub name: Option<String>,
+    pub addr: MySockAddr,
+    pub found: bool,
+    pub next: Option<Box<Iname>>,
 }
 
-#[derive(Debug)]
-pub enum MySockAddr {
-    V4(SocketAddr),
-    V6(SocketAddr),
-}
-
-#[derive(Debug)]
 pub struct ServerFd {
     fd: i32,
     source_addr: MySockAddr,
     next: Option<Arc<ServerFd>>,
 }
 
-#[derive(Debug)]
 pub struct Server {
     addr: MySockAddr,
     source_addr: MySockAddr,
@@ -114,9 +164,9 @@ pub fn read_opts(
     groupname: &str,
     domain_suffix: Option<String>,
     runfile: Option<&str>,
-    if_names: &Option<&mut Vec<Iname>>,
-    if_addrs: &Option<&mut Vec<Iname>>,
-    if_except: &Option<&mut Vec<Iname>>,
+    if_names: &Option<Box<Iname>>,
+    if_addrs: &Option<Box<Iname>>,
+    if_except: &Option<Box<Iname>>,
     bogus_addr: Option<&mut BogusAddr>,
     serv_addrs: Option<&mut Vec<Server>>,
     cachesize: Option<&mut usize>,
