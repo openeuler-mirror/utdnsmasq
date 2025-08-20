@@ -113,7 +113,7 @@ pub fn read_opts(
     username: &str,
     groupname: &str,
     domain_suffix: Option<String>,
-    runfile: &str,
+    runfile: Option<&str>,
     if_names: &Option<&mut Vec<Iname>>,
     if_addrs: &Option<&mut Vec<Iname>>,
     if_except: &Option<&mut Vec<Iname>>,
