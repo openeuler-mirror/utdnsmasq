@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#[warn(unused_must_use)]
 pub mod cache;
 pub mod forward_init;
 pub mod lease;
@@ -82,23 +83,11 @@ struct Passwd {
 }
 
 // 存储接口名称和地址
-#[derive(Debug)]
 struct Irec {
-    addr: Option<MySockAddr>,
+    addr: MySockAddr,
     fd: i32,
     valid: bool,
     next: Option<Box<Irec>>, // 使用 Option<Box<Irec>> 实现链表
-}
-
-impl Irec {
-    fn new(fd: i32, valid: bool, addr: Option<MySockAddr>) -> Irec {
-        Irec {
-            addr,
-            fd,
-            valid,
-            next: None,
-        }
-    }
 }
 
 fn start(argc: usize, args: Vec<String>) -> usize {
@@ -116,7 +105,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut local_ttl: u64 = 0; // 本地缓存 TTL，初始值为 0
     let runfile: Option<&str> = RUNFILE; // 进程 PID 文件路径，默认为 RUNFILE
 
-    let interfaces = Irec::new(-1, false, None);
+    let interfaces: Option<Irec> = None;
     // 时间戳相关变量
     let resolv_changed: u64 = 0;
     let now: u64 = 0;
@@ -133,9 +122,9 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let domain_suffix: Option<String> = None; // 域名后缀
     let mut username: &str = CHUSER; // 用户名，默认值为 CHUSER
     let mut groupname: &str = CHGRP; // 组名，默认值为 CHGRP
-    let mut if_names: Option<&mut Vec<Iname>> = None; // 用于存储接口名称
-    let mut if_addrs: Option<&mut Vec<Iname>> = None; // 用于存储接口地址
-    let if_except: Option<&mut Vec<Iname>> = None; // 用于存储例外情况
+    let mut if_names: Option<Box<Iname>> = None; // 用于存储接口名称
+    let mut if_addrs: Option<Box<Iname>> = None; // 用于存储接口地址
+    let if_except: Option<Box<Iname>> = None; // 用于存储例外情况
     let bogus_addr: Option<&mut BogusAddr> = None;
     let dhcp_sname: Option<&mut String> = None;
     let dhcp_file: Option<&mut String> = Default::default();
@@ -188,38 +177,36 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         file_logger.error("********* Please configure the dnsmasq integrated DHCP server by using");
         file_logger.error("********* the \"dhcp-range\" option, and remove any other DHCP server.");
     }
-    // let mut interfaces = Interfaces::new();
     // let int_err_string = enumerate_interfaces(&mut interfaces, dhcp.is_some(), port);
     // if int_err_string.is_err() {
     //     file_logger.error("********* FAILED to start up");
     //     return 1;
     // }
 
-    for if_name in if_names {
-        if if_name.is_empty() {
-            file_logger.error("********* Unknown interface name found");
-            return 1;
+    let mut if_tmp = &if_names;
+    while let Some(ref iname) = if_tmp {
+        if iname.name.is_some() && !iname.found {
+            file_logger.error(&format!("********* unknown interface"));
         }
+        if_tmp = &iname.next;
     }
 
-    // 检查每个地址是否为有效的v4 v6地址
-    // for if_addr in if_addrs {
-    //     if if_addr.1.is_some() {
-    //         if Ipv4Addr::from_str(&(if_addr.1).expect("REASON").to_string()).is_ok()
-    //             || Ipv6Addr::from_str(&(if_addr.1).expect("REASON").to_string()).is_ok()
-    //         {
-    //             match if_addr.1 {
-    //                 Some(IpAddr::V4(v4)) => {
-    //                     dnamebuff = (if_addr.1).expect("REASON").to_string().into()
-    //                 }
-    //                 Some(IpAddr::V6(v6)) => {
-    //                     dnamebuff = (if_addr.1).expect("REASON").to_string().into()
-    //                 }
-    //                 _ => (),
-    //             }
-    //         }
-    //     }
-    // }
+    let mut if_tmp = &if_addrs;
+    while let Some(ref iname) = if_tmp {
+        if !iname.found {
+            unsafe {
+                if iname.addr.sa.sa_family == 2 {
+                    // ipv4转换
+                    iname.addr.in_.sin_addr.s_addr.to_string();
+                } else {
+                    // ipv6转换
+                    // iname.addr.in6.sin6_addr.s6_addr.to_string();
+                }
+            }
+            file_logger.error(&format!("********* no interface with address"));
+        }
+        if_tmp = &iname.next;
+    }
 
     forward_init(true);
     Cache::new(cachesize, options & 4);

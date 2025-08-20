@@ -7,7 +7,7 @@
 use crate::*;
 
 pub struct FRec {
-    source: crate::MySockAddr,
+    source: MySockAddr,
     sentto: Option<Box<Server>>,
     orig_id: u16,
     new_id: u16,
