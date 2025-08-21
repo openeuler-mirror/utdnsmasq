@@ -16,7 +16,7 @@ use if_addrs::{IfAddr, Ifv4Addr, Ifv6Addr};
 use lease::*;
 use log::*;
 use nix::sys::stat::{umask, Mode};
-use nix::unistd::{chdir, fork, setsid, ForkResult};
+use nix::unistd::{chdir, close, fork, setsid, ForkResult};
 use option::*;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
@@ -84,10 +84,10 @@ struct Passwd {
 
 // 存储接口名称和地址
 struct Irec {
-    addr: MySockAddr,
-    fd: i32,
-    valid: bool,
-    next: Option<Box<Irec>>, // 使用 Option<Box<Irec>> 实现链表
+    pub addr: MySockAddr,
+    pub fd: i32,
+    pub valid: bool,
+    pub next: Option<Box<Irec>>, // 使用 Option<Box<Irec>> 实现链表
 }
 
 fn start(argc: usize, args: Vec<String>) -> usize {
@@ -105,14 +105,14 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut local_ttl: u64 = 0; // 本地缓存 TTL，初始值为 0
     let runfile: Option<&str> = RUNFILE; // 进程 PID 文件路径，默认为 RUNFILE
 
-    let interfaces: Option<Irec> = None;
+    let interfaces: Option<Box<Irec>> = None;
     // 时间戳相关变量
     let resolv_changed: u64 = 0;
     let now: u64 = 0;
     let last: u64 = 0;
     // 邮件交换相关变量
     let mut resolv = Resolv::default();
-    let mut dhcp: Option<Box<DhcpContext>> = None;
+    let mut dhcp: &Option<Box<DhcpContext>> = &None;
     let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
     let mut dhcp_opts: Option<Box<DhcpOpt>> = None;
     let mxname: Option<&mut String> = None;
@@ -216,7 +216,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         let packet_path = IFPACKET;
         let bpf_path = IFBPF;
         if file_exists(packet_path) && file_exists(bpf_path) {
-            let mut current = &dhcp;
+            let mut current = dhcp;
             while let Some(ctx) = current {
                 if ctx.iface.is_empty() {
                     // 如果 iface 为空字符串，执行后续代码块
@@ -244,7 +244,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         // 进程守护化
         daemonize();
         // 将进程的当前工作目录切换到根目录是守护进程通常的操作，避免锁定文件系统
-        chdir("/");
+        let _ = chdir("/");
         // 确保创建的文件权限符合系统和应用的安全要求
         umask(Mode::from_bits_truncate(0o022));
 
@@ -263,6 +263,33 @@ fn start(argc: usize, args: Vec<String>) -> usize {
 
         // 设置文件权限掩码为 0
         umask(Mode::from_bits_truncate(0));
+
+        // 根据特定条件关闭未被占用的文件描述符
+        // 通过安全的数据结构管理和迭代器遍历来实现对文件描述符的查找和关闭，确保只关闭那些未被占用的文件描述符，同时避免了可能的内存不安全问题。
+        for i in 0..64 {
+            let mut iface_tmp = &interfaces;
+            while let Some(ref iface) = iface_tmp {
+                if iface.fd == i {
+                    break;
+                }
+                iface_tmp = &iface.next;
+            }
+
+            if iface_tmp.is_none() {
+                let mut dhcp_tmp = dhcp;
+                while let Some(ref dhcp_entry) = dhcp_tmp {
+                    if dhcp_entry.fd == i && dhcp_entry.rawfd == i {
+                        break;
+                    }
+                    dhcp_tmp = &dhcp_entry.next;
+                }
+                if dhcp_tmp.is_none() {
+                    if !(Some(dhcp).is_some() && i == leasefd) {
+                        let _ = close(i);
+                    }
+                }
+            }
+        }
     }
     // 退出前加入信号处理线程
     // signals_handle.join().unwrap();
