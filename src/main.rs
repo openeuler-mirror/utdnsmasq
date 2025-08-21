@@ -9,27 +9,24 @@ pub mod cache;
 pub mod forward_init;
 pub mod lease;
 pub mod log;
+pub mod network;
 pub mod option;
 use cache::*;
 use forward_init::*;
-use if_addrs::{IfAddr, Ifv4Addr, Ifv6Addr};
 use lease::*;
 use log::*;
+use network::*;
 use nix::sys::stat::{umask, Mode};
 use nix::unistd::{chdir, close, fork, setsid, ForkResult};
 use option::*;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
 use std::path::Path;
 use std::process::exit;
-use std::ptr::NonNull;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{env, fs, process, thread};
 
@@ -58,18 +55,12 @@ const PACKETSZ: usize = 512; // 典型的 DNS 数据包大小
 const RRFIXEDSZ: usize = 10; // 资源记录的固定大小
 const CACHESIZ: usize = 1024; // 缓存大小默认值
 const NAMESERVER_PORT: u16 = 53; // Default DNS server port
-const RUNFILE: Option<&str> = Some("/var/run/dnsmasq.pid");
+const RUNFILE: Option<&str> = Some("/var/run/utdnsmasq.pid");
 const CHUSER: &str = "utdnsmasq"; // 默认用户名
 const CHGRP: &str = "utdnsmasq"; // 默认组名
 const IFPACKET: &str = "/usr/include/netpacket/packet.h";
 const IFBPF: &str = "/usr/include/net/bpf.h";
 const OPT_DEBUG: u32 = 64;
-
-#[derive(Debug)]
-struct Interface {
-    name: String,
-    addr: Option<IpAddr>,
-}
 
 #[derive(Debug)]
 struct Passwd {
@@ -83,11 +74,12 @@ struct Passwd {
 }
 
 // 存储接口名称和地址
-struct Irec {
+#[derive(Clone)]
+pub struct Irec {
     pub addr: MySockAddr,
     pub fd: i32,
     pub valid: bool,
-    pub next: Option<Box<Irec>>, // 使用 Option<Box<Irec>> 实现链表
+    pub next: Option<Box<Irec>>,
 }
 
 fn start(argc: usize, args: Vec<String>) -> usize {
@@ -105,25 +97,25 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut local_ttl: u64 = 0; // 本地缓存 TTL，初始值为 0
     let runfile: Option<&str> = RUNFILE; // 进程 PID 文件路径，默认为 RUNFILE
 
-    let interfaces: Option<Box<Irec>> = None;
+    let mut interfaces: Option<Box<Irec>> = None;
     // 时间戳相关变量
     let resolv_changed: u64 = 0;
     let now: u64 = 0;
     let last: u64 = 0;
     // 邮件交换相关变量
     let mut resolv = Resolv::default();
-    let mut dhcp: &Option<Box<DhcpContext>> = &None;
-    let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
-    let mut dhcp_opts: Option<Box<DhcpOpt>> = None;
+    let dhcp: &Option<Box<DhcpContext>> = &None;
+    let dhcp_conf: Option<Box<DhcpConfig>> = None;
+    let dhcp_opts: Option<Box<DhcpOpt>> = None;
     let mxname: Option<&mut String> = None;
     let mxtarget: Option<&mut String> = None;
     let mut lease_file: Option<&mut String> = None; // 租约文件路径
-    let mut addn_hosts: Option<&mut String> = None; // 额外主机文件路径
+    let addn_hosts: Option<&mut String> = None; // 额外主机文件路径
     let domain_suffix: Option<String> = None; // 域名后缀
     let mut username: &str = CHUSER; // 用户名，默认值为 CHUSER
     let mut groupname: &str = CHGRP; // 组名，默认值为 CHGRP
-    let mut if_names: Option<Box<Iname>> = None; // 用于存储接口名称
-    let mut if_addrs: Option<Box<Iname>> = None; // 用于存储接口地址
+    let if_names: Option<Box<Iname>> = None; // 用于存储接口名称
+    let if_addrs: Option<Box<Iname>> = None; // 用于存储接口地址
     let if_except: Option<Box<Iname>> = None; // 用于存储例外情况
     let bogus_addr: Option<&mut BogusAddr> = None;
     let dhcp_sname: Option<&mut String> = None;
@@ -177,11 +169,18 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         file_logger.error("********* Please configure the dnsmasq integrated DHCP server by using");
         file_logger.error("********* the \"dhcp-range\" option, and remove any other DHCP server.");
     }
-    // let int_err_string = enumerate_interfaces(&mut interfaces, dhcp.is_some(), port);
-    // if int_err_string.is_err() {
-    //     file_logger.error("********* FAILED to start up");
-    //     return 1;
-    // }
+    let int_err_string = enumerate_interfaces(
+        &mut interfaces,
+        if_names.clone(),
+        if_addrs.clone(),
+        if_except,
+        dhcp,
+        port,
+    );
+    if int_err_string.is_err() {
+        file_logger.error("********* FAILED to start up");
+        return 1;
+    }
 
     let mut if_tmp = &if_names;
     while let Some(ref iname) = if_tmp {
@@ -247,7 +246,6 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         let _ = chdir("/");
         // 确保创建的文件权限符合系统和应用的安全要求
         umask(Mode::from_bits_truncate(0o022));
-
         if let Some(runfile) = runfile {
             // 打开文件用于写入 pid
             if let Ok(mut pidfile) = File::create(runfile) {
