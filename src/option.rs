@@ -118,9 +118,9 @@ pub struct ResolvC {
 const ETHER_ADDR_LEN: usize = 6;
 #[derive(Debug)]
 pub struct DhcpContext {
-    pub fd: isize,
-    pub rawfd: isize,
-    pub ifindex: isize,
+    pub fd: i32,
+    pub rawfd: i32,
+    pub ifindex: i32,
     pub iface: String,
     pub hwaddr: [u8; ETHER_ADDR_LEN],
     pub lease_time: u32,
