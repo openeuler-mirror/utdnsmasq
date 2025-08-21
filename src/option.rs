@@ -36,7 +36,7 @@ pub struct In6Addr {
     s6_addr: [u8; 16],
 }
 
-#[derive(Copy, Clone)]
+#[derive(PartialEq, Copy, Clone)]
 #[repr(C)]
 pub struct SockAddr {
     pub sa_family: SaFamilyT,
@@ -74,6 +74,7 @@ pub struct MySockAddrIn6 {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
 pub union MySockAddr {
     pub sa: SockAddr,
     pub in_: SockAddrIn,
@@ -85,6 +86,7 @@ pub union MySockAddr {
     pub in6: SockAddrIn6,
 }
 
+#[derive(Clone)]
 pub struct Iname {
     pub name: Option<String>,
     pub addr: MySockAddr,
@@ -92,12 +94,14 @@ pub struct Iname {
     pub next: Option<Box<Iname>>,
 }
 
+#[derive(Clone)]
 pub struct ServerFd {
     fd: i32,
     source_addr: MySockAddr,
     next: Option<Arc<ServerFd>>,
 }
 
+#[derive(Clone)]
 pub struct Server {
     addr: MySockAddr,
     source_addr: MySockAddr,
