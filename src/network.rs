@@ -111,7 +111,7 @@ pub fn enumerate_interfaces(
     names: Option<Box<Iname>>,
     addrs: Option<Box<Iname>>,
     except: Option<Box<Iname>>,
-    dhcp: &Option<Box<DhcpContext>>,
+    dhcp: &mut Option<Box<DhcpContext>>,
     port: u16,
 ) -> Result<(), String> {
     let socket = match Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)) {
@@ -131,45 +131,73 @@ pub fn enumerate_interfaces(
 
     // 获取真实的网络接口
     let interfaces = get_network_interfaces();
-    // for iface in interfaces {
-    //     // 处理接口的 IP 地址
-    //     match iface.addr {
-    //         IfAddr::V4(ifaddr) => {
-    //             let my_sock_addr = MySockAddr {
-    //                 sa_family: 2, // AF_INET
-    //                 sa_data: [0; 14], // 模拟的地址数据
-    //             };
+    for iface in interfaces {
+        let flags: u32 = 0;
+        // 处理接口的 IP 地址
+        match iface.addr {
+            IfAddr::V4(ifaddr) => {
+                let my_sock_addr = MySockAddr {
+                    sa: SockAddr {
+                        sa_family: 2,     // AF_INET
+                        sa_data: [0; 14], // 模拟的地址数据
+                    },
+                };
+                // 处理 DHCP 配置（如果传递了 DHCP 上下文）
+                if let Some(dhcp_ctx) = dhcp.as_mut() {
+                    if iface.name != "lo" && !(flags & (0x8 | 0x10) != 0) {
+                        let netmask = Ipv4Addr::new(255, 255, 255, 0); // 模拟的子网掩码
+                        let broadcast = Ipv4Addr::new(192, 168, 1, 255); // 模拟的广播地址
 
-    //             // 调用 add_iface 函数
-    //             add_iface(
-    //                 interfacep,
-    //                 0, // 模拟的 flags
-    //                 &iface.name,
-    //                 &my_sock_addr,
-    //                 names.clone(),
-    //                 addrs.clone(),
-    //                 except.clone(),
-    //             );
-    //         }
-    //         IfAddr::V6(ifaddr) => {
-    //             let my_sock_addr = MySockAddr.sa {
-    //                 sa_family: 10, // AF_INET6
-    //                 sa_data: [0; 14], // 模拟的地址数据
-    //             };
+                        // 检查是否符合 DHCP 配置
+                        if dhcp_ctx.start <= ifaddr.ip && dhcp_ctx.end >= ifaddr.ip {
+                            dhcp_ctx.iface = iface.name.clone();
+                            dhcp_ctx.netmask = netmask;
+                            dhcp_ctx.broadcast = broadcast;
 
-    //             // 调用 add_iface 函数
-    //             add_iface(
-    //                 interfacep,
-    //                 0, // 模拟的 flags
-    //                 &iface.name,
-    //                 &my_sock_addr,
-    //                 names.clone(),
-    //                 addrs.clone(),
-    //                 except.clone(),
-    //             );
-    //         }
-    //     }
-    // }
+                            // 模拟 DHCP 套接字创建
+                            let dhcp_socket =
+                                Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+                                    .map_err(|e| {
+                                        format!("Failed to create DHCP socket: {:?}", e)
+                                    })?;
+
+                            dhcp_ctx.fd = dhcp_socket.as_raw_fd();
+                        }
+                    }
+                }
+
+                // 调用 add_iface 函数
+                add_iface(
+                    interfacep,
+                    0, // 模拟的 flags
+                    &iface.name,
+                    &my_sock_addr,
+                    names.clone(),
+                    addrs.clone(),
+                    except.clone(),
+                );
+            }
+            IfAddr::V6(ifaddr) => {
+                let my_sock_addr = MySockAddr {
+                    sa: SockAddr {
+                        sa_family: 10,    // AF_INET6
+                        sa_data: [0; 14], // 模拟的地址数据
+                    },
+                };
+
+                // 调用 add_iface 函数
+                add_iface(
+                    interfacep,
+                    0, // 模拟的 flags
+                    &iface.name,
+                    &my_sock_addr,
+                    names.clone(),
+                    addrs.clone(),
+                    except.clone(),
+                );
+            }
+        }
+    }
 
     Ok(())
 }

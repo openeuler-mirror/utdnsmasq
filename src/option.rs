@@ -119,7 +119,7 @@ pub struct ResolvC {
     name: Option<String>,
 }
 
-const ETHER_ADDR_LEN: usize = 6;
+pub const ETHER_ADDR_LEN: usize = 6;
 #[derive(Debug)]
 pub struct DhcpContext {
     pub fd: i32,

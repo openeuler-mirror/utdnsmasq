@@ -104,7 +104,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let last: u64 = 0;
     // 邮件交换相关变量
     let mut resolv = Resolv::default();
-    let dhcp: &Option<Box<DhcpContext>> = &None;
+    let mut dhcp: Option<Box<DhcpContext>> = None;
     let dhcp_conf: Option<Box<DhcpConfig>> = None;
     let dhcp_opts: Option<Box<DhcpOpt>> = None;
     let mxname: Option<&mut String> = None;
@@ -174,7 +174,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         if_names.clone(),
         if_addrs.clone(),
         if_except,
-        dhcp,
+        &mut dhcp,
         port,
     );
     if int_err_string.is_err() {
@@ -184,7 +184,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
 
     let mut if_tmp = &if_names;
     while let Some(ref iname) = if_tmp {
-        if iname.name.is_some() && !iname.found {
+        if iname.name.is_none() && !iname.found {
             file_logger.error(&format!("********* unknown interface"));
         }
         if_tmp = &iname.next;
@@ -211,11 +211,11 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     Cache::new(cachesize, options & 4);
 
     // 检查DHCP配置并验证必要的文件是否存在
-    if dhcp.is_some() {
+    if dhcp.is_none() {
         let packet_path = IFPACKET;
         let bpf_path = IFBPF;
         if file_exists(packet_path) && file_exists(bpf_path) {
-            let mut current = dhcp;
+            let mut current = &dhcp;
             while let Some(ctx) = current {
                 if ctx.iface.is_empty() {
                     // 如果 iface 为空字符串，执行后续代码块
@@ -274,15 +274,19 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             }
 
             if iface_tmp.is_none() {
-                let mut dhcp_tmp = dhcp;
-                while let Some(ref dhcp_entry) = dhcp_tmp {
+                let mut dhcp_tmp = &mut dhcp;
+                let mut found_in_dhcp = false; // 标记是否找到匹配的 DHCP 条目
+
+                while let Some(ref mut dhcp_entry) = dhcp_tmp {
                     if dhcp_entry.fd == i && dhcp_entry.rawfd == i {
+                        found_in_dhcp = true;
                         break;
                     }
-                    dhcp_tmp = &dhcp_entry.next;
+                    dhcp_tmp = &mut dhcp_entry.next;
                 }
-                if dhcp_tmp.is_none() {
-                    if !(Some(dhcp).is_some() && i == leasefd) {
+
+                if !found_in_dhcp {
+                    if !(dhcp.is_none() && i == leasefd) {
                         let _ = close(i);
                     }
                 }
