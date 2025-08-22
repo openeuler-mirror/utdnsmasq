@@ -33,7 +33,7 @@ pub struct InAddr {
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct In6Addr {
-    s6_addr: [u8; 16],
+    pub(crate) s6_addr: [u8; 16],
 }
 
 #[derive(PartialEq, Copy, Clone)]
@@ -62,27 +62,11 @@ pub struct SockAddrIn6 {
     pub sin6_scope_id: u32,
 }
 
-#[cfg(feature = "broken_sockaddr_in6")]
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub struct MySockAddrIn6 {
-    pub sin6_family: SaFamilyT,
-    pub sin6_port: InPortT,
-    pub sin6_flowinfo: u32,
-    pub sin6_addr: In6Addr,
-    pub sin6_scope_id: u32,
-}
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union MySockAddr {
     pub sa: SockAddr,
     pub in_: SockAddrIn,
-
-    #[cfg(feature = "broken_sockaddr_in6")]
-    pub in6: MySockAddrIn6,
-
-    #[cfg(all(feature = "ipv6", not(feature = "broken_sockaddr_in6")))]
     pub in6: SockAddrIn6,
 }
 
