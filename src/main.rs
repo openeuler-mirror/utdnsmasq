@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#[warn(unused_must_use)]
+extern crate libc;
 pub mod cache;
 pub mod forward_init;
 pub mod lease;
@@ -14,6 +14,7 @@ pub mod option;
 use cache::*;
 use forward_init::*;
 use lease::*;
+use libc::{getgrnam, getpwnam, gid_t, group, passwd, setgid, setgroups, setuid};
 use log::*;
 use network::*;
 use nix::sys::stat::{umask, Mode};
@@ -21,9 +22,9 @@ use nix::unistd::{chdir, close, fork, setsid, ForkResult};
 use option::*;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
+use std::ffi::CString;
 use std::fs::File;
 use std::io::Write;
-use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::exit;
@@ -56,10 +57,10 @@ const RRFIXEDSZ: usize = 10; // 资源记录的固定大小
 const CACHESIZ: usize = 1024; // 缓存大小默认值
 const NAMESERVER_PORT: u16 = 53; // Default DNS server port
 const RUNFILE: Option<&str> = Some("/var/run/utdnsmasq.pid");
-const CHUSER: &str = "utdnsmasq"; // 默认用户名
-const CHGRP: &str = "utdnsmasq"; // 默认组名
+const CHUSER: &str = "nobody"; // 默认用户名
+const CHGRP: &str = "dip"; // 默认组名
 const IFPACKET: &str = "/usr/include/netpacket/packet.h";
-const IFBPF: &str = "/usr/include/net/bpf.h";
+const IFBPF: &str = "/usr/include/linux/bpf.h";
 const OPT_DEBUG: u32 = 64;
 
 #[derive(Debug)]
@@ -290,6 +291,29 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                         let _ = close(i);
                     }
                 }
+            }
+        }
+
+        unsafe {
+            let c_username = CString::new(username).expect("CString::new failed");
+            let ent_pw: *mut passwd = getpwnam(c_username.as_ptr());
+
+            if !ent_pw.is_null() {
+                // 移除所有附加组
+                let dummy: [gid_t; 0] = [];
+                setgroups(0, dummy.as_ptr());
+
+                // 获取组信息
+                let c_groupname = CString::new(groupname).expect("CString::new failed");
+                let gp: *mut group = getgrnam(c_groupname.as_ptr());
+
+                if !gp.is_null() {
+                    // 设置组 ID
+                    setgid((*gp).gr_gid);
+                }
+
+                // 丢弃 root 权限并设置用户 ID
+                setuid((*ent_pw).pw_uid);
             }
         }
     }

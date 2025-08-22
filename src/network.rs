@@ -7,7 +7,7 @@
 use crate::*;
 use get_if_addrs::{get_if_addrs, IfAddr, Interface};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::net::UdpSocket;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6, UdpSocket};
 use std::os::unix::io::AsRawFd; // 用于获取文件描述符
 
 // 添加接口函数
@@ -106,6 +106,26 @@ pub fn add_iface(
     None
 }
 
+// 将 `Ipv4Addr` 转换为 `InAddr`
+fn create_in_addr(ip: Ipv4Addr) -> InAddr {
+    InAddr {
+        s_addr: u32::from(ip).to_be(), // 转换为网络字节序
+    }
+}
+
+// 将 `Ipv6Addr` 转换为 `In6Addr`
+fn create_in6_addr(ip: Ipv6Addr) -> In6Addr {
+    In6Addr {
+        s6_addr: ip.octets(), // 直接使用 `octets` 方法获取16字节数组
+    }
+}
+
+// 获取 IPv6 作用域 ID
+fn get_scope_id(ipv6_addr: Ipv6Addr, port: u16) -> u32 {
+    let socket_addr_v6 = SocketAddrV6::new(ipv6_addr, port, 0, 0);
+    socket_addr_v6.scope_id() // 获取作用域 ID
+}
+
 pub fn enumerate_interfaces(
     interfacep: &mut Option<Box<Irec>>,
     names: Option<Box<Iname>>,
@@ -114,7 +134,7 @@ pub fn enumerate_interfaces(
     dhcp: &mut Option<Box<DhcpContext>>,
     port: u16,
 ) -> Result<(), String> {
-    let socket = match Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)) {
+    let _socket = match Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)) {
         Ok(sock) => sock,
         Err(e) => {
             // 如果创建套接字失败，返回错误消息
@@ -137,9 +157,11 @@ pub fn enumerate_interfaces(
         match iface.addr {
             IfAddr::V4(ifaddr) => {
                 let my_sock_addr = MySockAddr {
-                    sa: SockAddr {
-                        sa_family: 2,     // AF_INET
-                        sa_data: [0; 14], // 模拟的地址数据
+                    in_: SockAddrIn {
+                        sin_family: 2,                       // AF_INET
+                        sin_addr: create_in_addr(ifaddr.ip), // 模拟的地址数据
+                        sin_port: port.to_be(),
+                        sin_zero: [0; 8],
                     },
                 };
                 // 处理 DHCP 配置（如果传递了 DHCP 上下文）
@@ -178,10 +200,14 @@ pub fn enumerate_interfaces(
                 );
             }
             IfAddr::V6(ifaddr) => {
+                let scope_id = get_scope_id(ifaddr.ip, port);
                 let my_sock_addr = MySockAddr {
-                    sa: SockAddr {
-                        sa_family: 10,    // AF_INET6
-                        sa_data: [0; 14], // 模拟的地址数据
+                    in6: SockAddrIn6 {
+                        sin6_family: 10,                       // AF_INET6
+                        sin6_port: port.to_be(),               // 网络字节序端口
+                        sin6_flowinfo: 0,                      // 模拟的流信息
+                        sin6_addr: create_in6_addr(ifaddr.ip), // 使用正确的 `In6Addr`
+                        sin6_scope_id: scope_id,               // 作用域ID
                     },
                 };
 
