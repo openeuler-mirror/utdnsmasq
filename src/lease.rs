@@ -5,12 +5,15 @@
  */
 
 use crate::*;
+use dhcp::find_config;
 use std::io::{self, BufRead};
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ETHER_ADDR_LEN: usize = 6;
+static mut DNS_DIRTY: Option<u32> = None;
+static mut FILE_DIRTY: Option<u32> = None;
 
 #[derive(Debug)]
 struct DhcpLease {
@@ -92,6 +95,8 @@ pub fn lease_init(
             );
         }
 
+        unsafe { DNS_DIRTY = Some(1) };
+        unsafe { FILE_DIRTY = Some(0) };
         // 将租约添加到链表中
         lease.next = leases;
         leases = Some(Box::new(*lease));
@@ -103,9 +108,11 @@ pub fn lease_init(
         // 查找与当前租约匹配的 DHCP 配置
         if let Some(config) = find_config(
             dhcp_configs,
+            None,
             lease.clid.clone(),
             lease.clid_len,
-            lease.hwaddr,
+            &lease.hwaddr,
+            None,
         ) {
             if let Some(ref hostname) = config.hostname {
                 lease_set_hostname(Some(hostname), domain.clone(), lease);
@@ -116,18 +123,6 @@ pub fn lease_init(
 
     // 返回文件描述符
     lease_file.as_raw_fd()
-}
-
-fn find_config(
-    dhcp_configs: &mut Option<Box<DhcpConfig>>,
-    clid: Vec<u8>,
-    clid_len: usize,
-    hwaddr: [u8; ETHER_ADDR_LEN],
-) -> Option<Box<DhcpConfig>> {
-    // 示例实现，查找符合条件的配置
-    dhcp_configs
-        .as_mut()
-        .and_then(|config| Some(config.clone()))
 }
 
 fn lease_set_hostname(name: Option<&str>, suffix: Option<String>, leases: &mut Box<DhcpLease>) {
@@ -176,7 +171,6 @@ fn lease_set_hostname(name: Option<&str>, suffix: Option<String>, leases: &mut B
     leases.hostname = new_name;
     leases.fqdn = new_fqdn;
 
-    // 此处可以添加状态管理的逻辑，例如：
-    // file_dirty = true; // 根据需要调整状态管理
-    // dns_dirty = true;
+    unsafe { FILE_DIRTY = Some(1) };
+    unsafe { DNS_DIRTY = Some(1) };
 }
