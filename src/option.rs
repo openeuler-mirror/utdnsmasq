@@ -121,7 +121,7 @@ pub struct DhcpContext {
     pub next: Option<Box<DhcpContext>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DhcpConfig {
     pub clid_len: usize,
     pub clid: Vec<u8>,
@@ -147,10 +147,10 @@ pub fn read_opts(
     resolv_file: Option<&mut Resolv>,
     mxname: Option<&mut String>,
     mxtarget: Option<&mut String>,
-    lease_file: &Option<&mut String>,
+    lease_file: &Option<&str>,
     username: &str,
     groupname: &str,
-    domain_suffix: Option<String>,
+    domain_suffix: &Option<String>,
     runfile: Option<&str>,
     if_names: &Option<Box<Iname>>,
     if_addrs: &Option<Box<Iname>>,
@@ -163,7 +163,7 @@ pub fn read_opts(
     local_ttl: Option<&mut u64>,
     addn_hosts: Option<&mut String>,
     dhcp: &Option<Box<DhcpContext>>,
-    dhcp_conf: Option<Box<DhcpConfig>>,
+    dhcp_conf: &Option<Box<DhcpConfig>>,
     opts: Option<Box<DhcpOpt>>,
     dhcp_file: Option<&mut String>,
     dhcp_sname: Option<&mut String>,

@@ -5,164 +5,178 @@
  */
 
 use crate::*;
-use std::cell::RefCell;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead};
 use std::net::Ipv4Addr;
-use std::path::Path;
-use std::rc::Rc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::os::fd::AsRawFd;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const ETHER_ADDR_LEN: usize = 6;
 
 #[derive(Debug)]
 struct DhcpLease {
-    clid_len: usize,                      // client identifier 的长度
-    clid: Option<Vec<u8>>,                // client identifier，使用 Vec<u8> 来存储字节数组
-    hostname: Option<String>,             // 客户端提供的主机名，使用 Option<String> 来处理可选字段
-    fqdn: Option<String>,                 // 完全限定域名，使用 Option<String>
-    expires: SystemTime,                  // 租约到期时间，使用 SystemTime 来存储时间
-    hwaddr: [u8; ETHER_ADDR_LEN],         // MAC 地址，使用固定大小的数组存储
-    addr: Ipv4Addr,                       // IPv4 地址，使用标准库中的 Ipv4Addr 类型
-    next: Option<Rc<RefCell<DhcpLease>>>, // 指向下一个租约，使用 Rc 和 RefCell 来实现可变的共享所有权
+    clid_len: usize,
+    clid: Vec<u8>,
+    hostname: Option<String>,
+    fqdn: Option<String>,
+    expires: u64, // 使用u64表示UNIX时间戳
+    hwaddr: [u8; ETHER_ADDR_LEN],
+    addr: Ipv4Addr,
+    next: Option<Box<DhcpLease>>,
 }
 
-fn lease_set_hostname(lease: &mut DhcpLease, hostname: &str, domain: &str) {
-    // 如果域名存在，将其添加到主机名中
-    let fqdn = if !domain.is_empty() {
-        format!("{}.{}", hostname, domain)
-    } else {
-        hostname.to_string()
-    };
-    lease.hostname = Some(fqdn);
-}
-
-fn find_config<'a>(
-    dhcp_configs: &'a [DhcpConfig],
-    _hwaddr: &[u8; ETHER_ADDR_LEN],
-) -> Option<&'a DhcpConfig> {
-    // 在 dhcp_configs 中查找与硬件地址匹配的配置
-    // 这里可以根据需求加入匹配 hwaddr 的逻辑
-    dhcp_configs.iter().find(|config| config.hostname.is_some())
-}
-
-pub fn lease_init<P: AsRef<Path>>(
-    filename: P,
-    domain: &str,
-    buff: &mut String,
-    buff2: &mut String,
+pub fn lease_init(
+    filename: Option<&str>,
+    domain: Option<String>,
+    buff: Vec<u8>,
+    buff2: Vec<u8>,
     now: SystemTime,
-    dhcp_configs: &[DhcpConfig],
-) -> std::io::Result<File> {
-    // 打开租约文件，若文件不存在则创建它
-    let mut lease_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(&filename)?;
+    dhcp_configs: &mut Option<Box<DhcpConfig>>,
+) -> i32 {
+    let mut leases: Option<Box<DhcpLease>> = None;
+    let now_unix = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
 
-    // 使用 BufReader 逐行读取文件
-    lease_file.seek(SeekFrom::Start(0))?; // 确保从文件开头读取
-    let reader = BufReader::new(&lease_file);
+    // 打开文件
+    let lease_file = match filename {
+        Some(f) => File::open(f).expect("Cannot open or create leases file"),
+        None => return -1,
+    };
 
-    let mut has_old = false;
-    let mut leases: Option<Rc<RefCell<DhcpLease>>> = None;
+    let reader = io::BufReader::new(&lease_file);
 
+    // 逐行读取租约文件
     for line in reader.lines() {
-        let line = line?;
-        let mut parts = line.split_whitespace();
-
-        // 解析 ei（过期时间）
-        let ei = parts.next().unwrap_or("0").parse::<u64>().unwrap_or(0);
-        let expires = UNIX_EPOCH + Duration::from_secs(ei);
-
-        // 跳过已过期的租约
-        if ei != 0
-            && now.duration_since(expires).unwrap_or(Duration::new(0, 0)) > Duration::new(0, 0)
-        {
-            has_old = true;
-            continue;
+        let line = line.unwrap();
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 13 {
+            continue; // 忽略格式不正确的行
         }
 
-        // 解析 MAC 地址
-        let hwaddr = [
-            u8::from_str_radix(parts.next().unwrap_or("00"), 16).unwrap_or(0),
-            u8::from_str_radix(parts.next().unwrap_or("00"), 16).unwrap_or(0),
-            u8::from_str_radix(parts.next().unwrap_or("00"), 16).unwrap_or(0),
-            u8::from_str_radix(parts.next().unwrap_or("00"), 16).unwrap_or(0),
-            u8::from_str_radix(parts.next().unwrap_or("00"), 16).unwrap_or(0),
-            u8::from_str_radix(parts.next().unwrap_or("00"), 16).unwrap_or(0),
-        ];
+        // 解析租约信息
+        let ei: u64 = parts[0].parse().unwrap();
+        let e0 = u32::from_str_radix(parts[1], 16).unwrap();
+        let e1 = u32::from_str_radix(parts[2], 16).unwrap();
+        let e2 = u32::from_str_radix(parts[3], 16).unwrap();
+        let e3 = u32::from_str_radix(parts[4], 16).unwrap();
+        let e4 = u32::from_str_radix(parts[5], 16).unwrap();
+        let e5 = u32::from_str_radix(parts[6], 16).unwrap();
+        let a0: u8 = parts[7].parse().unwrap();
+        let a1: u8 = parts[8].parse().unwrap();
+        let a2: u8 = parts[9].parse().unwrap();
+        let a3: u8 = parts[10].parse().unwrap();
+        let buff = parts[11].as_bytes().to_vec();
+        let buff2 = parts[12].as_bytes().to_vec();
 
-        // 解析 IP 地址
-        let addr = Ipv4Addr::new(
-            parts.next().unwrap_or("0").parse::<u8>().unwrap_or(0),
-            parts.next().unwrap_or("0").parse::<u8>().unwrap_or(0),
-            parts.next().unwrap_or("0").parse::<u8>().unwrap_or(0),
-            parts.next().unwrap_or("0").parse::<u8>().unwrap_or(0),
-        );
+        // 检查租约是否过期
+        if ei != 0 && now_unix > ei {
+            continue; // 跳过过期的租约
+        }
 
-        // 解析主机名
-        *buff = match parts.next().unwrap_or("*") {
-            "*" => String::new(),
-            name => name.to_string(),
-        };
-
-        // 解析客户端标识符
-        *buff2 = parts.next().unwrap_or("*").to_string();
-        let client_id: Option<_> = if buff2 == "*" {
-            None
-        } else {
-            let hex_pairs = buff2.as_bytes().chunks(2); // 每两位一组解析为hex
-            Some(
-                hex_pairs
-                    .map(|chunk| {
-                        let hex_str = std::str::from_utf8(chunk).unwrap(); // 将切片转为字符串
-                        u8::from_str_radix(hex_str, 16).unwrap_or(0) // 解析为u8
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        };
-
-        // 计算 clid_len，使用 match 处理 Option
-        let clid_len = match &client_id {
-            Some(clid) => clid.len(), // 如果 client_id 存在，返回其长度
-            None => 0,                // 如果 client_id 是 None，返回 0
-        };
-
-        // 创建租约结构
-        let lease = Rc::new(RefCell::new(DhcpLease {
-            clid_len,
-            clid: client_id,
-            hostname: Some(buff.clone()),
+        // 创建新的租约
+        let mut lease: Box<DhcpLease> = Box::new(DhcpLease {
+            clid_len: buff2.len(),
+            clid: buff2,
+            hwaddr: [e0 as u8, e1 as u8, e2 as u8, e3 as u8, e4 as u8, e5 as u8],
+            hostname: None,
             fqdn: None,
-            expires,
-            hwaddr,
-            addr,
+            addr: Ipv4Addr::new(a0, a1, a2, a3),
+            expires: ei,
             next: None,
-        }));
+        });
 
-        // 将 lease 链接到 leases 链表
-        if let Some(ref mut lease_head) = leases {
-            lease.borrow_mut().next = Some(lease_head.clone());
+        // 设置主机名
+        if buff != b"*" {
+            lease_set_hostname(
+                Some(std::str::from_utf8(&buff).unwrap()),
+                domain.clone(),
+                &mut lease,
+            );
         }
-        leases = Some(lease.clone());
+
+        // 将租约添加到链表中
+        lease.next = leases;
+        leases = Some(Box::new(*lease));
     }
 
-    // 遍历租约并根据配置更新主机名
-    let mut lease_head = leases.clone();
-    while let Some(lease_rc) = lease_head {
-        let lease = lease_rc.borrow();
-        if let Some(config) = find_config(dhcp_configs, &lease.hwaddr) {
-            if let Some(hostname) = &config.hostname {
-                lease_set_hostname(&mut lease_rc.borrow_mut(), hostname, domain);
+    // 处理配置文件和租约之间的关系
+    let mut lease_ptr = leases.as_mut();
+    while let Some(lease) = lease_ptr {
+        // 查找与当前租约匹配的 DHCP 配置
+        if let Some(config) = find_config(
+            dhcp_configs,
+            lease.clid.clone(),
+            lease.clid_len,
+            lease.hwaddr,
+        ) {
+            if let Some(ref hostname) = config.hostname {
+                lease_set_hostname(Some(hostname), domain.clone(), lease);
             }
         }
-        lease_head = lease.next.clone();
+        lease_ptr = lease.next.as_mut();
     }
 
-    // 返回文件句柄
-    Ok(lease_file)
+    // 返回文件描述符
+    lease_file.as_raw_fd()
+}
+
+fn find_config(
+    dhcp_configs: &mut Option<Box<DhcpConfig>>,
+    clid: Vec<u8>,
+    clid_len: usize,
+    hwaddr: [u8; ETHER_ADDR_LEN],
+) -> Option<Box<DhcpConfig>> {
+    // 示例实现，查找符合条件的配置
+    dhcp_configs
+        .as_mut()
+        .and_then(|config| Some(config.clone()))
+}
+
+fn lease_set_hostname(name: Option<&str>, suffix: Option<String>, leases: &mut Box<DhcpLease>) {
+    let mut new_name: Option<String> = None;
+    let mut new_fqdn: Option<String> = None;
+
+    // 如果没有提供名称且没有主机名，返回
+    if name.is_none() && leases.hostname.is_none() {
+        return;
+    }
+
+    // 如果提供了名称，处理可能的冲突
+    if let Some(name) = name {
+        let mut lease_current: Option<&mut Box<DhcpLease>> = Some(leases);
+
+        // 遍历租约链表以查找冲突
+        //把ref mut 去掉
+        while let Some(current_lease) = lease_current {
+            // 检查当前租约的主机名是否与新名称冲突
+            if let Some(ref hostname) = current_lease.hostname {
+                if hostname == name {
+                    new_name = Some(hostname.clone()); // 保存旧主机名
+                    current_lease.hostname = None; // 移除旧主机名
+                    current_lease.fqdn = None; // 移除旧的FQDN
+                }
+            }
+
+            // 移动到下一个租约
+            lease_current = current_lease.next.as_mut(); // 获取下一个租约的可变引用
+        }
+
+        // 如果没有找到旧主机名，则分配新的内存
+        if new_name.is_none() {
+            new_name = Some(name.to_string());
+        }
+
+        // 如果提供了后缀并且没有旧的FQDN，则生成新的FQDN
+        if let Some(suffix) = suffix {
+            if new_fqdn.is_none() {
+                new_fqdn = Some(format!("{}.{}", name, suffix));
+            }
+        }
+    }
+
+    // 更新当前租约的主机名和FQDN
+    leases.hostname = new_name;
+    leases.fqdn = new_fqdn;
+
+    // 此处可以添加状态管理的逻辑，例如：
+    // file_dirty = true; // 根据需要调整状态管理
+    // dns_dirty = true;
 }

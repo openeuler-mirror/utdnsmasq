@@ -11,6 +11,7 @@ pub mod lease;
 pub mod log;
 pub mod network;
 pub mod option;
+pub mod util;
 use cache::*;
 use forward_init::*;
 use lease::*;
@@ -29,6 +30,7 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::SystemTime;
 use std::{env, fs, process, thread};
 
 // 全局标志变量，使用 AtomicBool 来保证线程安全
@@ -62,6 +64,7 @@ const CHGRP: &str = "dip"; // 默认组名
 const IFPACKET: &str = "/usr/include/netpacket/packet.h";
 const IFBPF: &str = "/usr/include/linux/bpf.h";
 const OPT_DEBUG: u32 = 64;
+const LEASEFILE: Option<&str> = Some("/var/lib/misc/dnsmasq.leases");
 
 #[derive(Debug)]
 struct Passwd {
@@ -106,11 +109,11 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     // 邮件交换相关变量
     let mut resolv = Resolv::default();
     let mut dhcp: Option<Box<DhcpContext>> = None;
-    let dhcp_conf: Option<Box<DhcpConfig>> = None;
+    let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
     let dhcp_opts: Option<Box<DhcpOpt>> = None;
     let mxname: Option<&mut String> = None;
     let mxtarget: Option<&mut String> = None;
-    let mut lease_file: Option<&mut String> = None; // 租约文件路径
+    let mut lease_file: Option<&str> = None; // 租约文件路径
     let addn_hosts: Option<&mut String> = None; // 额外主机文件路径
     let domain_suffix: Option<String> = None; // 域名后缀
     let mut username: &str = CHUSER; // 用户名，默认值为 CHUSER
@@ -139,10 +142,10 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         Some(&mut resolv),
         mxname,
         mxtarget,
-        &lease_file,
+        &mut lease_file,
         &mut username,
         &mut groupname,
-        domain_suffix,
+        &domain_suffix,
         runfile,
         &if_names,
         &if_addrs,
@@ -155,15 +158,14 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         Some(&mut local_ttl),
         addn_hosts,
         &dhcp,
-        dhcp_conf,
+        &mut dhcp_conf,
         dhcp_opts,
         dhcp_file,
         dhcp_sname,
         dhcp_next_server,
     );
     if lease_file.is_none() {
-        let mut lease_files = String::from("/var/lib/misc/dnsmasq.leases");
-        lease_file = Some(&mut lease_files);
+        lease_file = LEASEFILE;
     } else if dhcp.is_none() {
         file_logger.error("********* dhcp-lease option set, but not dhcp-range.");
         file_logger.error("********* Are you trying to use the obsolete ISC dhcpd integration?");
@@ -222,7 +224,14 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                     // 如果 iface 为空字符串，执行后续代码块
                     file_logger
                         .error("********* No suitable interface for DHCP service at address");
-                    // leasefd = lease_init(lease_file, domain_suffix, dnamebuff, packet, time(NULL), dhcp_configs);
+                    let mut leasefd = lease_init(
+                        lease_file,
+                        domain_suffix.clone(),
+                        dnamebuff,
+                        packet,
+                        SystemTime::now(),
+                        &mut dhcp_conf,
+                    );
                     // lease_update_dns(1);
                     return 1;
                 }
@@ -317,6 +326,24 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             }
         }
     }
+
+    /*  后面要补上
+        openlog("dnsmasq",
+    DNSMASQ_LOG_OPT(options & OPT_DEBUG),
+    DNSMASQ_LOG_FAC(options & OPT_DEBUG));
+
+    if (cachesize)
+    syslog(LOG_INFO, "started, version %s cachesize %d", VERSION, cachesize);
+    else
+    syslog(LOG_INFO, "started, version %s cache disabled", VERSION);
+
+    if (options & OPT_LOCALMX)
+    syslog(LOG_INFO, "serving MX record for local hosts target %s", mxtarget);
+    else if (mxname)
+    syslog(LOG_INFO, "serving MX record for mailhost %s target %s",
+        mxname, mxtarget);
+    */
+
     // 退出前加入信号处理线程
     // signals_handle.join().unwrap();
     0
