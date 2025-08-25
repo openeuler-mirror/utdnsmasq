@@ -6,6 +6,7 @@
 
 extern crate libc;
 pub mod cache;
+pub mod dhcp;
 pub mod forward_init;
 pub mod lease;
 pub mod log;
