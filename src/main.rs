@@ -16,7 +16,7 @@ pub mod util;
 use cache::*;
 use forward_init::*;
 use lease::*;
-use libc::{getgrnam, getpwnam, gid_t, group, passwd, setgid, setgroups, setuid};
+use libc::{getegid, getgrnam, getpwnam, getuid, gid_t, group, passwd, setgid, setgroups, setuid};
 use log::*;
 use network::*;
 use nix::sys::stat::{umask, Mode};
@@ -344,6 +344,32 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     syslog(LOG_INFO, "serving MX record for mailhost %s target %s",
         mxname, mxtarget);
     */
+
+    let mut dhcp_tmp = &dhcp;
+    while let Some(ref config) = dhcp_tmp {
+        // 获取起始 IP 地址
+        let dnamebuff = config.start.to_string();
+
+        // 租约时间格式化
+        let packet = if config.lease_time == 0 {
+            String::from("infinite")
+        } else {
+            format!("{}s", config.lease_time)
+        };
+
+        // 记录 DHCP 信息 syslog
+        println!(
+            "DHCP on {}, IP range {} -- {}, lease time {}",
+            config.iface, dnamebuff, config.end, packet
+        );
+
+        // 移动到下一个配置
+        dhcp_tmp = &config.next;
+    }
+
+    if unsafe { getuid() == 0 || getegid() == 0 } {
+        // syslog("failed to drop root privs for user");
+    }
 
     // 退出前加入信号处理线程
     // signals_handle.join().unwrap();

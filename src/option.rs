@@ -7,21 +7,21 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
-type SaFamilyT = u16;
-type InPortT = u16;
-type InAddrT = u32;
+pub type SaFamilyT = u16;
+pub type InPortT = u16;
+pub type InAddrT = u32;
 
 #[derive(Default, Clone)]
 pub struct Resolv {
-    file: Option<String>,
-    valid: u8,
-    serial: u32,
-    filename: &'static str,
+    pub file: Option<String>,
+    pub valid: u8,
+    pub serial: u32,
+    pub filename: &'static str,
 }
 
 pub struct BogusAddr {
-    addr: InAddr,
-    next: Option<Box<BogusAddr>>,
+    pub addr: InAddr,
+    pub next: Option<Box<BogusAddr>>,
 }
 
 #[derive(Copy, Clone)]
@@ -80,27 +80,27 @@ pub struct Iname {
 
 #[derive(Clone)]
 pub struct ServerFd {
-    fd: i32,
-    source_addr: MySockAddr,
-    next: Option<Arc<ServerFd>>,
+    pub fd: i32,
+    pub source_addr: MySockAddr,
+    pub next: Option<Arc<ServerFd>>,
 }
 
 #[derive(Clone)]
 pub struct Server {
-    addr: MySockAddr,
-    source_addr: MySockAddr,
-    sfd: Option<ServerFd>,
-    domain: Option<String>,
-    flags: u32,
-    next: Option<Box<Server>>,
+    pub addr: MySockAddr,
+    pub source_addr: MySockAddr,
+    pub sfd: Option<ServerFd>,
+    pub domain: Option<String>,
+    pub flags: u32,
+    pub next: Option<Box<Server>>,
 }
 
 #[derive(Debug)]
 pub struct ResolvC {
-    next: Option<Box<ResolvC>>,
-    is_default: bool,
-    logged: bool,
-    name: Option<String>,
+    pub next: Option<Box<ResolvC>>,
+    pub is_default: bool,
+    pub logged: bool,
+    pub name: Option<String>,
 }
 
 pub const ETHER_ADDR_LEN: usize = 6;
