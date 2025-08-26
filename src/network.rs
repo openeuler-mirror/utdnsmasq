@@ -5,10 +5,13 @@
  */
 
 use crate::*;
+use forward_init::*;
 use get_if_addrs::{get_if_addrs, IfAddr, Interface};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV6, UdpSocket};
+use std::collections::VecDeque;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::os::unix::io::AsRawFd; // 用于获取文件描述符
+use util::*;
 
 // 添加接口函数
 pub fn add_iface(
@@ -236,6 +239,139 @@ fn get_network_interfaces() -> Vec<Interface> {
         Err(e) => {
             println!("获取接口时发生错误: {}", e);
             Vec::new()
+        }
+    }
+}
+
+pub fn check_servers(
+    mut new: Option<Box<Server>>,
+    interfaces: &Option<Box<Iname>>,
+    sfds: &mut VecDeque<ServerFd>,
+) -> Option<Box<Server>> {
+    let mut ret: Option<Box<Server>> = None;
+
+    // 进行 DHCP 服务器检查
+    forward_init(false);
+
+    while let Some(ref mut server) = new {
+        let addr_str = match unsafe { server.addr.sa.sa_family } {
+            2 => {
+                // IPv4
+                let addr = unsafe { server.addr.in_ };
+                format!("{}:{}", addr.sin_addr.s_addr, addr.sin_port)
+            }
+            10 => {
+                // IPv6
+                let addr = unsafe { server.addr.in6 };
+                format!(
+                    "{}:{}",
+                    addr.sin6_addr
+                        .s6_addr
+                        .iter()
+                        .map(|b| format!("{:x}", b))
+                        .collect::<Vec<_>>()
+                        .join(":"),
+                    addr.sin6_port
+                )
+            }
+            _ => continue,
+        };
+
+        let port = match unsafe { server.addr.sa.sa_family } {
+            2 => unsafe { server.addr.in_.sin_port },
+            10 => unsafe { server.addr.in6.sin6_port },
+            _ => continue,
+        };
+
+        // 检查是否是本地接口
+        let mut iface_found = false;
+        if let Some(iface) = interfaces {
+            let mut iface_tmp = Some(iface);
+            while let Some(current_iface) = iface_tmp {
+                if sockaddr_isequal(&server.addr, &current_iface.addr) {
+                    iface_found = true;
+                    break;
+                }
+                iface_tmp = current_iface.next.as_ref();
+            }
+        }
+
+        if iface_found {
+            // warn!("Ignoring nameserver {} - local interface", addr_str);
+            new = server.next.take();
+            continue;
+        }
+
+        // 分配 socket 文件描述符
+        if server.sfd.is_none() {
+            if let Some(sfd) = allocate_sfd(&server.source_addr, sfds) {
+                server.sfd = Some(sfd);
+            } else {
+                // warn!("Ignoring nameserver {} - cannot make/bind socket", addr_str);
+                new = server.next.take();
+                continue;
+            }
+        }
+
+        // 将服务器添加到返回链表
+        let next = server.next.take();
+        server.next = ret.take();
+        ret = Some(server.clone());
+        new = next;
+
+        // info("Using nameserver {}#{}", addr_str, port);
+    }
+
+    ret
+}
+
+pub fn allocate_sfd(source_addr: &MySockAddr, sfds: &mut VecDeque<ServerFd>) -> Option<ServerFd> {
+    // 首先检查是否已有合适的文件描述符
+    for sfd in sfds.iter() {
+        if sockaddr_isequal(&sfd.source_addr, source_addr) {
+            return Some(sfd.clone());
+        }
+    }
+
+    // 创建一个新的 ServerFd
+    let mut sfd = ServerFd {
+        fd: -1, // 默认值
+        source_addr: *source_addr,
+        next: None,
+    };
+
+    // 创建 UDP 套接字
+    let socket_addr: SocketAddr = unsafe {
+        match source_addr.sa.sa_family {
+            2 => {
+                let addr = source_addr.in_;
+                SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::from(addr.sin_addr.s_addr)),
+                    addr.sin_port,
+                )
+            }
+            10 => {
+                let addr = source_addr.in6;
+                SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::from(addr.sin6_addr.s6_addr)),
+                    addr.sin6_port,
+                )
+            }
+            _ => return None,
+        }
+    };
+
+    // 尝试绑定套接字
+    match UdpSocket::bind(socket_addr) {
+        Ok(sock) => {
+            sfd.fd = sock.as_raw_fd(); // 获取文件描述符
+                                       // 将新的 ServerFd 添加到 sfds 中
+            sfds.push_back(sfd.clone());
+            Some(sfd)
+        }
+        Err(err) => {
+            // warn!("Failed to create socket: {}", err);
+            None
         }
     }
 }

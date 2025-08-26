@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use crate::*;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::ffi::CString;
@@ -79,30 +80,18 @@ pub fn safe_string_alloc(cp: &str) -> *mut i8 {
     c_ptr
 }
 
-pub fn sockaddr_isequal(addr1: &SocketAddr, addr2: &SocketAddr) -> i32 {
-    match (addr1, addr2) {
-        // 如果都是 IPv4 地址
-        (SocketAddr::V4(v4_1), SocketAddr::V4(v4_2)) => {
-            if v4_1.ip() == v4_2.ip() && v4_1.port() == v4_2.port() {
-                1 // IPv4 地址相同
-            } else {
-                0 // IPv4 地址不相同
+// 检查地址是否与接口相等的函数
+pub fn sockaddr_isequal(addr1: &MySockAddr, addr2: &MySockAddr) -> bool {
+    unsafe {
+        match (addr1.sa.sa_family, addr2.sa.sa_family) {
+            (2, 2) => addr1.in_.sin_addr.s_addr == addr2.in_.sin_addr.s_addr, // AF_INET
+            (10, 10) => {
+                let in6_addr1 = &addr1.in6;
+                let in6_addr2 = &addr2.in6;
+                in6_addr1.sin6_addr.s6_addr == in6_addr2.sin6_addr.s6_addr // AF_INET6
             }
+            _ => false,
         }
-        // 如果都是 IPv6 地址
-        (SocketAddr::V6(v6_1), SocketAddr::V6(v6_2)) => {
-            if v6_1.ip() == v6_2.ip()
-                && v6_1.port() == v6_2.port()
-                && v6_1.flowinfo() == v6_2.flowinfo()
-                && v6_1.scope_id() == v6_2.scope_id()
-            {
-                1 // IPv6 地址相同
-            } else {
-                0 // IPv6 地址不相同
-            }
-        }
-        // 地址类型不同
-        _ => 0,
     }
 }
 
