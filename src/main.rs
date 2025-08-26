@@ -14,17 +14,16 @@ pub mod network;
 pub mod option;
 pub mod util;
 use cache::*;
+use daemonize::Daemonize;
 use forward_init::*;
 use lease::*;
-use libc::{getegid, getgrnam, getpwnam, getuid, gid_t, group, passwd, setgid, setgroups, setuid};
 use log::*;
 use network::*;
 use nix::sys::stat::{umask, Mode};
-use nix::unistd::{chdir, close, fork, setsid, ForkResult};
+use nix::unistd::{chdir, close, geteuid, getuid, setgid, setuid, Gid, Uid};
 use option::*;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
-use std::ffi::CString;
 use std::fs::File;
 use std::io::Write;
 use std::net::Ipv4Addr;
@@ -33,6 +32,7 @@ use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use std::{env, fs, process, thread};
+use users::{get_group_by_name, get_user_by_name};
 
 // 全局标志变量，使用 AtomicBool 来保证线程安全
 static SIGHUP_FLAG: AtomicBool = AtomicBool::new(true);
@@ -304,27 +304,43 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             }
         }
 
-        unsafe {
-            let c_username = CString::new(username).expect("CString::new failed");
-            let ent_pw: *mut passwd = getpwnam(c_username.as_ptr());
-
-            if !ent_pw.is_null() {
-                // 移除所有附加组
-                let dummy: [gid_t; 0] = [];
-                setgroups(0, dummy.as_ptr());
-
-                // 获取组信息
-                let c_groupname = CString::new(groupname).expect("CString::new failed");
-                let gp: *mut group = getgrnam(c_groupname.as_ptr());
-
-                if !gp.is_null() {
-                    // 设置组 ID
-                    setgid((*gp).gr_gid);
+        if let username = username {
+            // 获取用户信息
+            if let Some(user) = get_user_by_name(username) {
+                // 设置组ID
+                if let groupname = groupname {
+                    if let Some(group) = get_group_by_name(groupname) {
+                        let gid = Gid::from_raw(group.gid());
+                        // 设置组ID
+                        if let Err(e) = setgid(gid) {
+                            // err!("Failed to set group ID: {}", e);
+                            exit(1);
+                        }
+                    } else {
+                        // err!("Group not found: {}", groupname);
+                        exit(1);
+                    }
+                } else {
+                    // 如果没有提供组名，则使用用户的主组
+                    let primary_gid = Gid::from_raw(user.primary_group_id());
+                    if let Err(e) = setgid(primary_gid) {
+                        // err!("Failed to set group ID: {}", e);
+                        exit(1);
+                    }
                 }
 
-                // 丢弃 root 权限并设置用户 ID
-                setuid((*ent_pw).pw_uid);
+                // 最后，设置用户ID
+                if let Err(e) = setuid(Uid::from_raw(user.uid())) {
+                    // err!("Failed to set user ID: {}", e);
+                    exit(1);
+                }
+            } else {
+                // err("User not found: {}", username);
+                exit(1);
             }
+        } else {
+            // err("Username cannot be None");
+            exit(1);
         }
     }
 
@@ -358,16 +374,16 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         };
 
         // 记录 DHCP 信息 syslog
-        println!(
-            "DHCP on {}, IP range {} -- {}, lease time {}",
-            config.iface, dnamebuff, config.end, packet
-        );
+        // info!(
+        //     "DHCP on {}, IP range {} -- {}, lease time {}",
+        //     config.iface, dnamebuff, config.end, packet
+        // );
 
         // 移动到下一个配置
         dhcp_tmp = &config.next;
     }
 
-    if unsafe { getuid() == 0 || getegid() == 0 } {
+    if getuid().is_root() || geteuid().is_root() {
         // syslog("failed to drop root privs for user");
     }
 
@@ -377,38 +393,23 @@ fn start(argc: usize, args: Vec<String>) -> usize {
 }
 
 fn daemonize() {
-    // 第一次 fork
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { .. }) => {
-            // 父进程退出
-            exit(0);
-        }
-        Ok(ForkResult::Child) => {
-            // 子进程继续
-        }
-        Err(err) => {
-            eprintln!("Fork failed: {}", err);
-            exit(1);
-        }
-    }
+    // 创建守护进程
+    let daemonize = Daemonize::new()
+        .pid_file(RUNFILE.expect("REASON").to_string()) // 设置 PID 文件的路径
+        .chown_pid_file(true) // 设置是否将 PID 文件的所有权更改为当前用户
+        .umask(0o027) // 设置 umask
+        .working_directory("/") // 设置工作目录
+        .stdout(File::open("/dev/null").unwrap()) // 将标准输出重定向到 /dev/null
+        .stderr(File::open("/dev/null").unwrap()); // 将标准错误重定向到 /dev/null
 
-    // 创建新会话
-    if let Err(err) = setsid() {
-        eprintln!("setsid failed: {}", err);
-        exit(1);
-    }
-
-    // 第二次 fork
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { .. }) => {
-            // 父进程退出
-            exit(0);
+    match daemonize.start() {
+        Ok(_) => {
+            loop {
+                // info!("Daemon is running...");
+            }
         }
-        Ok(ForkResult::Child) => {
-            // 最终的子进程继续
-        }
-        Err(err) => {
-            eprintln!("Second fork failed: {}", err);
+        Err(e) => {
+            // warn!("Error starting daemon: {}", e);
             exit(1);
         }
     }
