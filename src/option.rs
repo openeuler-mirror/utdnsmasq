@@ -156,7 +156,7 @@ pub fn read_opts(
     if_addrs: &Option<Box<Iname>>,
     if_except: &Option<Box<Iname>>,
     bogus_addr: Option<&mut BogusAddr>,
-    serv_addrs: Option<&mut Vec<Server>>,
+    serv_addrs: &Option<Box<Server>>,
     cachesize: Option<&mut usize>,
     port: Option<&mut u16>,
     query_port: Option<&mut i32>,

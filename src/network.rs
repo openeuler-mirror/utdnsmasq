@@ -245,7 +245,7 @@ fn get_network_interfaces() -> Vec<Interface> {
 
 pub fn check_servers(
     mut new: Option<Box<Server>>,
-    interfaces: &Option<Box<Iname>>,
+    interfaces: &Option<Box<Irec>>,
     sfds: &mut VecDeque<ServerFd>,
 ) -> Option<Box<Server>> {
     let mut ret: Option<Box<Server>> = None;
