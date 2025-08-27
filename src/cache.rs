@@ -25,7 +25,7 @@ const F_IPV4: u32 = 1024;
 const F_IPV6: u32 = 2048;
 const OPT_EXPAND: u32 = 1;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AllAddr {
     Addr4(Ipv4Addr),
     Addr6(Ipv6Addr),
@@ -45,7 +45,7 @@ pub enum Name {
     Namep(Box<String>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Crec {
     pub next: Option<*mut Crec>,
     pub prev: Option<*mut Crec>,
@@ -120,17 +120,17 @@ impl Cache {
         cache
     }
 
-    fn cache_link(&mut self, crec: &mut Box<Crec>) {
+    fn cache_link(&mut self, crec: &mut Crec) {
         // 将一个 Crec 结构体实例插入到双向链表的头部，并更新链表的头尾指针
         crec.next = self.cache_head;
         if let Some(head) = self.cache_head {
             unsafe {
-                (*head).prev = Some(&mut **crec);
+                (*head).prev = Some(crec);
             }
         }
-        self.cache_head = Some(&mut **crec);
+        self.cache_head = Some(crec);
         if self.cache_tail.is_none() {
-            self.cache_tail = Some(&mut **crec);
+            self.cache_tail = Some(crec);
         }
     }
     fn cache_unlink(&mut self, crec: *mut Crec) {
@@ -161,11 +161,11 @@ impl Cache {
 
 // 缓存重新加载
 pub fn cache_reload(
-    opts: u32,
-    mut buff: String,
-    domain_suffix: &str,
-    addn_hosts: Option<&str>,
     caches: &mut Cache,
+    opts: u32,
+    mut buff: &mut Vec<u8>,
+    mut domain_suffix: Option<String>,
+    addn_hosts: Option<&str>,
 ) {
     // 清除缓存逻辑
     for i in 0..caches.hash_size {
@@ -212,7 +212,8 @@ pub fn cache_reload(
 
     // 处理主 hosts 文件
     if opts & OPT_NO_HOSTS == 0 {
-        if let Err(err) = read_hostsfile(HOSTSFILE, opts, &mut buff, domain_suffix, 0) {
+        if let Err(err) = read_hostsfile(caches, HOSTSFILE, opts, &mut buff, &mut domain_suffix, 0)
+        {
             // err("Error reading hosts file: {}", err);
         }
     }
@@ -220,10 +221,11 @@ pub fn cache_reload(
     // 处理附加 hosts 文件
     if let Some(addn_hosts) = addn_hosts {
         if let Err(err) = read_hostsfile(
-            addn_hosts,
+            caches,
+            &addn_hosts,
             opts,
             &mut buff,
-            domain_suffix,
+            &mut domain_suffix,
             F_ADDN.try_into().unwrap(),
         ) {
             // eer("Error reading additional hosts file: {}", err);
@@ -233,10 +235,11 @@ pub fn cache_reload(
 
 // 读取主机文件（如 /etc/hosts），并解析其中的内容
 fn read_hostsfile(
+    caches: &mut Cache,
     filename: &str,
     opts: u32,
-    buff: &mut String,
-    domain_suffix: &str,
+    buff: &mut Vec<u8>,
+    domain_suffix: &mut Option<String>,
     addn_flag: u16,
 ) -> io::Result<()> {
     let file = File::open(filename)?;
@@ -248,12 +251,12 @@ fn read_hostsfile(
         let line = line?;
         lineno += 1;
 
-        // 清空缓冲区并设置当前行内容
+        // 将当前行内容转换为字节并推送到缓冲区
         buff.clear();
-        buff.push_str(&line);
+        buff.extend_from_slice(line.as_bytes());
 
-        // 分割行并获取第一个 token
-        let mut tokens = buff.split_whitespace();
+        // 使用空白字符分割行并获取第一个 token
+        let mut tokens = line.split_whitespace();
         let first_token = tokens.next();
 
         if let Some(token) = first_token {
@@ -272,13 +275,16 @@ fn read_hostsfile(
 
             if let Some(addr) = addr {
                 let mut flags = F_HOSTS | F_IMMORTAL | F_FORWARD | F_REVERSE;
-
-                // 设置地址相关的标志
-                if let AllAddr::Addr4(_) = addr {
-                    flags |= F_IPV4;
-                } else {
-                    flags |= F_IPV6;
-                }
+                let addrlen = match addr {
+                    AllAddr::Addr4(_) => {
+                        flags |= F_IPV4;
+                        std::mem::size_of::<Ipv4Addr>()
+                    }
+                    AllAddr::Addr6(_) => {
+                        flags |= F_IPV6;
+                        std::mem::size_of::<Ipv6Addr>()
+                    }
+                };
 
                 // 遍历其他 token
                 for token in tokens {
@@ -286,27 +292,23 @@ fn read_hostsfile(
                         break;
                     }
 
-                    let canonical_name = canonicalise(token);
-                    if canonical_name.is_some() {
+                    if let Some(canonical_name) = canonicalise(token) {
                         count += 1;
-                        let name_field = if canonical_name.as_ref().unwrap().len() < SMALLDNAME {
+                        let name_field = if canonical_name.len() < SMALLDNAME {
                             // 使用小名称数组
                             let mut sname = ['\0'; SMALLDNAME];
-                            for (i, c) in canonical_name.as_ref().unwrap().chars().enumerate() {
+                            for (i, c) in canonical_name.chars().enumerate() {
                                 sname[i] = c;
                             }
                             Name::Sname(sname)
                         } else {
                             // 使用动态分配的字符串
-                            Name::Namep(Box::new(canonical_name.clone().unwrap()))
+                            Name::Namep(Box::new(canonical_name.clone()))
                         };
 
-                        if (opts & OPT_EXPAND != 0)
-                            && !canonical_name.as_ref().unwrap().contains('.')
-                        {
-                            let _extended_name =
-                                format!("{}.{}", canonical_name.clone().unwrap(), domain_suffix);
-                            let cache = Crec {
+                        // 如果需要扩展名称，添加带默认域名的版本
+                        if (opts & OPT_EXPAND != 0) && !canonical_name.contains('.') {
+                            let mut cache = Crec {
                                 next: None,
                                 prev: None,
                                 hash_next: None,
@@ -315,11 +317,17 @@ fn read_hostsfile(
                                 flags: flags | addn_flag as u32,
                                 name: name_field.clone(),
                             };
-                            add_hosts_entry(&cache);
+                            add_hosts_entry(
+                                caches,
+                                &mut cache,
+                                &addr,
+                                addrlen,
+                                flags | addn_flag as u32,
+                            );
                             flags &= !F_REVERSE;
                         }
 
-                        let cache = Crec {
+                        let mut cache = Crec {
                             next: None,
                             prev: None,
                             hash_next: None,
@@ -328,20 +336,223 @@ fn read_hostsfile(
                             flags: flags | addn_flag as u32,
                             name: name_field,
                         };
-                        add_hosts_entry(&cache);
+                        add_hosts_entry(
+                            caches,
+                            &mut cache,
+                            &addr,
+                            addrlen,
+                            flags | addn_flag as u32,
+                        );
                         flags &= !F_REVERSE;
                     } else {
-                        // err("Invalid name at {} line {}", filename, lineno);
+                        // 处理无效的名称
+                        eprintln!("Invalid name at {} line {}", filename, lineno);
                     }
                 }
             }
         }
     }
 
-    // info("Read {} - {} addresses", filename, count);
+    println!("Read {} - {} addresses", filename, count);
     Ok(())
 }
 
-fn add_hosts_entry(crec: &Crec) {
-    println!("Adding host entry: {:?}", crec);
+// 计算时间差，返回以秒为单位的差值
+pub fn difftime(now: SystemTime, ttd: SystemTime) -> i64 {
+    match now.duration_since(ttd) {
+        Ok(duration) => duration.as_secs() as i64, // 正常情况返回秒数
+        Err(_) => -(ttd.duration_since(now).unwrap().as_secs() as i64), // 如果时间倒置，返回负数
+    }
+}
+
+// 计算字符串的哈希值
+pub fn hash_bucket<'a>(name: &'a str, cache: &'a mut Cache) -> &'a mut Option<*mut Crec> {
+    let mut val: u32 = 0;
+
+    // 计算哈希值
+    for c in name.bytes() {
+        val += if (b'A'..=b'Z').contains(&c) {
+            c + (b'a' - b'A') as u8
+        } else {
+            c
+        } as u32;
+    }
+
+    // 通过哈希值获取哈希桶索引
+    let index = (val & (cache.hash_size as u32 - 1)) as usize;
+
+    // 返回哈希表中的桶
+    &mut cache.hash_table[index]
+}
+
+// 将一个 Crec 结构体指针插入到缓存的哈希表中
+pub fn cache_hash(cache: &mut Cache, crecp: Option<*mut Crec>) {
+    if let Some(crecp_ptr) = crecp {
+        // 如果 crecp 是 Some，则继续处理
+        let name = cache_get_name(Some(crecp_ptr));
+        let bucket = hash_bucket(&name, cache);
+
+        unsafe {
+            // 将 crecp_ptr 插入到哈希桶链表的头部
+            (*crecp_ptr).hash_next = bucket.take(); // 从 bucket 中取出原有值，赋给 hash_next
+            *bucket = Some(crecp_ptr); // 将 crecp_ptr 设置为 bucket 的新值
+        }
+    }
+    // 如果 crecp 是 None，什么都不做
+}
+
+// 处理Crec结构体，返回相关字段
+pub fn cache_get_name(crecp: Option<*mut Crec>) -> String {
+    if let Some(crecp_ptr) = crecp {
+        unsafe {
+            // 解引用指针并检查 flags 以决定返回哪种名称
+            let crec = &*crecp_ptr;
+            match &crec.name {
+                Name::Bname(bname) if crec.flags & F_BIGNAME != 0 => {
+                    // 将字符数组转换为字符串
+                    bname
+                        .name
+                        .iter()
+                        .collect::<String>()
+                        .trim_end_matches('\0')
+                        .to_string()
+                }
+                Name::Namep(namep) if crec.flags & F_DHCP != 0 => *namep.clone(),
+                Name::Sname(sname) => {
+                    // 将字符数组转换为字符串
+                    sname
+                        .iter()
+                        .collect::<String>()
+                        .trim_end_matches('\0')
+                        .to_string()
+                }
+                _ => String::new(),
+            }
+        }
+    } else {
+        // 如果 crecp 是 None，则返回空字符串
+        String::new()
+    }
+}
+
+// 根据名称查找缓存记录
+pub fn cache_find_by_name(
+    cache: &mut Cache,
+    crecp: Option<*mut Crec>,
+    name: &str,
+    now: SystemTime,
+    prot: u32,
+) -> Option<*mut Crec> {
+    let mut ans: Option<*mut Crec> = None;
+
+    if let Some(crecp_ptr) = crecp {
+        // 如果 crecp 不为 None，直接返回 crecp 的 next 项
+        unsafe {
+            ans = (*crecp_ptr).next;
+        }
+    } else {
+        // 第一次查找：遍历哈希链表
+        let mut chainp = &mut ans;
+        let mut insert: Option<*mut Crec> = None;
+
+        // 遍历链表的所有节点
+        let mut current_opt = cache.cache_head;
+        while let Some(current_ptr) = current_opt {
+            let current = unsafe { &mut *current_ptr };
+
+            // 检查是否过期
+            if (current.flags & F_IMMORTAL != 0) || difftime(now, current.ttd) < 0 {
+                if (current.flags & F_FORWARD != 0)
+                    && (current.flags & prot != 0)
+                    && hostname_isequal(&cache_get_name(Some(current)), name)
+                {
+                    if current.flags & (F_HOSTS | F_DHCP) != 0 {
+                        *chainp = Some(current_ptr);
+                        chainp = unsafe { &mut (*current_ptr).next };
+                    } else {
+                        // 将当前节点移到链表头部
+                        Cache::cache_unlink(cache, current_ptr);
+                        Cache::cache_link(cache, unsafe { &mut *Box::from_raw(current_ptr) });
+                    }
+
+                    // 实现轮循：将匹配的节点移动到链表顶部
+                    if insert.is_none() {
+                        insert = Some(current_ptr);
+                    } else {
+                        // 分离 `next` 的取值和赋值操作
+                        let next_ptr = unsafe { (*current_ptr).next.take() };
+                        unsafe {
+                            (*current_ptr).next = insert; // 更新 `current.next`
+                        }
+                        insert = Some(current_ptr);
+                        current_opt = next_ptr; // 更新循环控制变量
+                        continue;
+                    }
+                } else {
+                    // 继续遍历下一个节点
+                    current_opt = unsafe { (*current_ptr).next };
+                    continue;
+                }
+            } else {
+                // 条目过期，从链表中移除
+                Cache::cache_unlink(cache, current_ptr);
+                current_opt = unsafe { (*current_ptr).next };
+                continue;
+            }
+        }
+    }
+
+    if let Some(ans_ptr) = ans {
+        let ans_ref = unsafe { &mut *ans_ptr };
+        if (ans_ref.flags & F_FORWARD != 0)
+            && (ans_ref.flags & prot != 0)
+            && hostname_isequal(&cache_get_name(Some(ans_ref)), name)
+        {
+            return Some(ans_ptr);
+        }
+    }
+
+    None
+}
+
+// 缓存中添加主机条目
+pub fn add_hosts_entry(
+    caches: &mut Cache,
+    cache: &mut Crec,
+    addr: &AllAddr,
+    addrlen: usize,
+    flags: u32,
+) {
+    let _ = addrlen;
+
+    // 获取名称键值
+    let name_key = match &cache.name {
+        Name::Sname(chars) => chars.iter().collect::<String>(),
+        Name::Namep(boxed_name) => *boxed_name.clone(),
+        Name::Bname(bname) => bname.name.iter().collect::<String>(),
+    };
+
+    // 查找是否存在重复项
+    if let Some(lookup) = cache_find_by_name(
+        caches,
+        None,
+        &name_key,
+        SystemTime::now(),
+        flags & (F_IPV4 | F_IPV6),
+    ) {
+        // 使用 `unsafe` 解引用并借用字段，而不是移动
+        unsafe {
+            if (*lookup).flags & F_HOSTS != 0 && addr == &(*lookup).addr {
+                // 如果找到匹配的条目，则直接返回
+                return;
+            }
+        }
+    }
+
+    // 设置标志和地址
+    cache.flags = flags;
+    cache.addr = addr.clone();
+
+    // 添加到缓存中
+    cache_hash(caches, Some(cache));
 }
