@@ -24,6 +24,7 @@ use nix::unistd::{chdir, close, geteuid, getuid, setgid, setuid, Gid, Uid};
 use option::*;
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
 use std::net::Ipv4Addr;
@@ -125,11 +126,13 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let bogus_addr: Option<&mut BogusAddr> = None;
     let dhcp_sname: Option<&mut String> = None;
     let dhcp_file: Option<&mut String> = Default::default();
-    let serv_addrs: Option<&mut Vec<Server>> = None;
+    let serv_addrs: Option<Box<Server>> = None;
     let mut dnamebuff = vec![0u8; MAXDNAME];
     let packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
     let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
     let leasefd: i32 = 0;
+    let serverfdp: Option<Box<ServerFd>> = None;
+    let mut sfds: VecDeque<ServerFd> = VecDeque::new();
 
     let signals = Signals::new(&[SIGUSR1, SIGUSR2, SIGHUP, SIGTERM]).unwrap();
     let signals_handle = thread::spawn(move || {
@@ -152,7 +155,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         &if_addrs,
         &if_except,
         bogus_addr,
-        serv_addrs,
+        &serv_addrs,
         Some(&mut cachesize),
         Some(&mut port),
         Some(&mut query_port),
@@ -386,6 +389,9 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     if getuid().is_root() || geteuid().is_root() {
         // syslog("failed to drop root privs for user");
     }
+
+    let servers = check_servers(serv_addrs, &interfaces, &mut sfds);
+    let last_server = servers.clone();
 
     // 退出前加入信号处理线程
     // signals_handle.join().unwrap();
