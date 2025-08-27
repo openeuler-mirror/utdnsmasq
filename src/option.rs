@@ -161,7 +161,7 @@ pub fn read_opts(
     port: Option<&mut u16>,
     query_port: Option<&mut i32>,
     local_ttl: Option<&mut u64>,
-    addn_hosts: Option<&mut String>,
+    addn_hosts: &Option<&mut String>,
     dhcp: &Option<Box<DhcpContext>>,
     dhcp_conf: &Option<Box<DhcpConfig>>,
     opts: Option<Box<DhcpOpt>>,

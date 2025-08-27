@@ -160,7 +160,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         Some(&mut port),
         Some(&mut query_port),
         Some(&mut local_ttl),
-        addn_hosts,
+        &addn_hosts,
         &dhcp,
         &mut dhcp_conf,
         dhcp_opts,
@@ -215,7 +215,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     }
 
     forward_init(true);
-    Cache::new(cachesize, options & 4);
+    let mut caches = Cache::new(cachesize, options & 4);
 
     // 检查DHCP配置并验证必要的文件是否存在
     if dhcp.is_none() {
@@ -392,6 +392,18 @@ fn start(argc: usize, args: Vec<String>) -> usize {
 
     let servers = check_servers(serv_addrs, &interfaces, &mut sfds);
     let last_server = servers.clone();
+    while !SIGTERM_FLAG.load(Ordering::Relaxed) {
+        if SIGHUP_FLAG.load(Ordering::Relaxed) {
+            // Reload cache and update DNS leases
+            cache_reload(
+                &mut caches,
+                options,
+                &mut dnamebuff,
+                domain_suffix.clone(),
+                addn_hosts.as_ref().map(|x| x.as_str()),
+            );
+        }
+    }
 
     // 退出前加入信号处理线程
     // signals_handle.join().unwrap();
