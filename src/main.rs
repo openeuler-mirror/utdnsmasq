@@ -9,7 +9,7 @@ pub mod cache;
 pub mod dhcp;
 pub mod forward_init;
 pub mod lease;
-pub mod log;
+pub mod logs;
 pub mod network;
 pub mod option;
 pub mod util;
@@ -17,7 +17,7 @@ use cache::*;
 use daemonize::Daemonize;
 use forward_init::*;
 use lease::*;
-use log::*;
+use logs::*;
 use network::*;
 use nix::sys::stat::{umask, Mode};
 use nix::unistd::{chdir, close, geteuid, getuid, setgid, setuid, Gid, Uid};
@@ -84,7 +84,6 @@ fn start(argc: usize, args: Vec<String>) -> usize {
        args: 命令行参数向量
        返回值：0 表示成功，其他值表示失败
     */
-    let file_logger = Logger::new(Some("/var/log/utdnsmasq.log".to_string()));
     let mut cachesize: usize = CACHESIZ; // 缓存大小，默认值为 CACHESIZ
     let mut port: u16 = NAMESERVER_PORT; // 名称服务器端口，默认为 NAMESERVER_PORT
     let mut query_port: i32 = 0; // 查询端口，初始值为0
@@ -160,10 +159,19 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     if lease_file.is_none() {
         lease_file = LEASEFILE;
     } else if dhcp.is_none() {
-        file_logger.error("********* dhcp-lease option set, but not dhcp-range.");
-        file_logger.error("********* Are you trying to use the obsolete ISC dhcpd integration?");
-        file_logger.error("********* Please configure the dnsmasq integrated DHCP server by using");
-        file_logger.error("********* the \"dhcp-range\" option, and remove any other DHCP server.");
+        complain("********* dhcp-lease option set, but not dhcp-range.", "");
+        complain(
+            "********* Are you trying to use the obsolete ISC dhcpd integration?",
+            "",
+        );
+        complain(
+            "********* Please configure the dnsmasq integrated DHCP server by using",
+            "",
+        );
+        complain(
+            "********* the \"dhcp-range\" option, and remove any other DHCP server.",
+            "",
+        );
     }
     let int_err_string = enumerate_interfaces(
         &mut interfaces,
@@ -174,14 +182,14 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         port,
     );
     if int_err_string.is_err() {
-        file_logger.error("********* FAILED to start up");
+        complain("********* FAILED to start up", "");
         return 1;
     }
 
     let mut if_tmp = &if_names;
     while let Some(ref iname) = if_tmp {
         if iname.name.is_none() && !iname.found {
-            file_logger.error(&format!("********* unknown interface"));
+            // die("********* unknown interface",if_tmp->name);
         }
         if_tmp = &iname.next;
     }
@@ -198,7 +206,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                     // iname.addr.in6.sin6_addr.s6_addr.to_string();
                 }
             }
-            file_logger.error(&format!("********* no interface with address"));
+            // die("********* no interface with address", dnamebuff);
         }
         if_tmp = &iname.next;
     }
@@ -215,8 +223,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             while let Some(ctx) = current {
                 if ctx.iface.is_empty() {
                     // 如果 iface 为空字符串，执行后续代码块
-                    file_logger
-                        .error("********* No suitable interface for DHCP service at address");
+                    // die("********* No suitable interface for DHCP service at address", inet_ntoa(dhcp_tmp->start));
                     let mut leasefd = lease_init(
                         lease_file,
                         domain_suffix.clone(),
@@ -233,7 +240,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                 current = &ctx.next;
             }
         } else {
-            file_logger.error("********* no DHCP support available on this OS.");
+            die("********* no DHCP support available on this OS.", "");
         }
     }
 
@@ -442,6 +449,9 @@ fn main() {
     // 创建一个 Vec<String> 类型的向量 args
     let mut args: Vec<String> = Vec::new();
 
+    // 初始化日志
+    log_init();
+
     // 遍历 std::env::args() 获取所有命令行参数
     for arg in env::args() {
         // 获取原始指针，并存储到 args 向量中
@@ -450,6 +460,9 @@ fn main() {
 
     // 参数数量（减一：去掉程序名）
     let argc = args.len() - 1;
+
+    //日志功能示例
+    syslog!(LOG_INFO, "argc: {}", argc);
 
     // 调用 start 函数，传入参数数量和参数指针数组
     let exit_code = start(argc, args);
