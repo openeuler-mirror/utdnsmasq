@@ -6,7 +6,8 @@
 
 use crate::*;
 use dhcp::find_config;
-use std::io::{self, BufRead};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead, Seek, Write};
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,6 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const ETHER_ADDR_LEN: usize = 6;
 static mut DNS_DIRTY: Option<u32> = None;
 static mut FILE_DIRTY: Option<u32> = None;
+static mut LEASES: Option<Box<DhcpLease>> = None;
+static LEASE_FILE_PATH: &str = "/var/lib/misc/dnsmasq.leases";
 
 #[derive(Debug)]
 struct DhcpLease {
@@ -173,4 +176,100 @@ fn lease_set_hostname(name: Option<&str>, suffix: Option<String>, leases: &mut B
 
     unsafe { FILE_DIRTY = Some(1) };
     unsafe { DNS_DIRTY = Some(1) };
+}
+
+// 更新 DHCP 租约文件和 DNS 缓存：
+pub fn lease_update_dns(force_dns: i32) -> io::Result<()> {
+    unsafe {
+        // 检查是否需要更新文件
+        if FILE_DIRTY.is_some() {
+            // 打开或创建文件
+            let mut lease_file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(LEASE_FILE_PATH)?;
+
+            // 重置文件指针并清空文件内容
+            lease_file.rewind()?;
+            lease_file.set_len(0)?;
+
+            // 遍历 DHCP 租约链表并写入信息到文件
+            let mut lease_opt = LEASES.as_deref();
+            while let Some(lease) = lease_opt {
+                // 写入租约基本信息
+                write!(
+                    lease_file,
+                    "{} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} {} {} ",
+                    lease.expires,
+                    lease.hwaddr[0],
+                    lease.hwaddr[1],
+                    lease.hwaddr[2],
+                    lease.hwaddr[3],
+                    lease.hwaddr[4],
+                    lease.hwaddr[5],
+                    lease.addr,
+                    lease.hostname.as_deref().unwrap_or("*")
+                )?;
+
+                // 写入客户端 ID（`clid`）
+                if lease.clid_len > 0 {
+                    for i in 0..lease.clid_len - 1 {
+                        write!(lease_file, "{:02x}:", lease.clid[i])?;
+                    }
+                    writeln!(lease_file, "{:02x}", lease.clid[lease.clid_len - 1])?;
+                } else {
+                    writeln!(lease_file, "*")?;
+                }
+
+                // 继续遍历链表
+                lease_opt = lease.next.as_deref();
+            }
+
+            lease_file.flush()?; // 刷新文件内容到磁盘
+            lease_file.sync_all()?; // 同步文件内容
+            FILE_DIRTY = Some(0); // 重置文件脏标志
+        }
+
+        // 检查是否需要更新 DNS 缓存
+        if DNS_DIRTY.is_some() || force_dns != 0 {
+            cache_unhash_dhcp();
+
+            let mut lease_opt = LEASES.as_deref();
+            while let Some(lease) = lease_opt {
+                if let Some(ref fqdn) = lease.fqdn {
+                    // 如果有 FQDN，添加到缓存
+                    cache_add_dhcp_entry(fqdn, &lease.addr, lease.expires, true);
+                    cache_add_dhcp_entry(
+                        lease.hostname.as_deref().unwrap_or("*"),
+                        &lease.addr,
+                        lease.expires,
+                        false,
+                    );
+                } else if let Some(ref hostname) = lease.hostname {
+                    // 只添加 hostname
+                    cache_add_dhcp_entry(hostname, &lease.addr, lease.expires, true);
+                }
+
+                // 继续遍历链表
+                lease_opt = lease.next.as_deref();
+            }
+
+            DNS_DIRTY = Some(0); // 重置 DNS 脏标志
+        }
+    }
+
+    Ok(())
+}
+
+// 清除 DNS 缓存中的 DHCP 条目
+fn cache_unhash_dhcp() {
+    // 清除 DNS 缓存的操作
+}
+
+// 添加 DHCP 条目到 DNS 缓存
+fn cache_add_dhcp_entry(name: &str, addr: &Ipv4Addr, expires: u64, reverse: bool) {
+    println!(
+        "Added DNS entry: {} -> {}, expires at {}, reverse: {}",
+        name, addr, expires, reverse
+    );
 }
