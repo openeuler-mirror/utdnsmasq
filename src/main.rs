@@ -68,17 +68,6 @@ const IFBPF: &str = "/usr/include/linux/bpf.h";
 const OPT_DEBUG: u32 = 64;
 const LEASEFILE: Option<&str> = Some("/var/lib/misc/dnsmasq.leases");
 
-#[derive(Debug)]
-struct Passwd {
-    pw_name: String,
-    pw_passwd: String,
-    pw_uid: u32,
-    pw_gid: u32,
-    pw_gecos: String,
-    pw_dir: String,
-    pw_shell: String,
-}
-
 // 存储接口名称和地址
 #[derive(Clone)]
 pub struct Irec {
@@ -236,7 +225,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                         SystemTime::now(),
                         &mut dhcp_conf,
                     );
-                    // lease_update_dns(1);
+                    lease_update_dns(1);
                     return 1;
                 }
 
@@ -394,7 +383,6 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let last_server = servers.clone();
     while !SIGTERM_FLAG.load(Ordering::Relaxed) {
         if SIGHUP_FLAG.load(Ordering::Relaxed) {
-            // Reload cache and update DNS leases
             cache_reload(
                 &mut caches,
                 options,
