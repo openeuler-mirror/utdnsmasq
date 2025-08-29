@@ -62,7 +62,7 @@ macro_rules! syslog {
      }};
  }
 
-pub fn complain(message: &str, mut arg1: &str) {
+pub fn complain(message: &str, arg1: &str) {
     let errmess = std::io::Error::last_os_error().to_string();
 
     let arg1: Cow<str> = if arg1.is_empty() {
@@ -78,8 +78,25 @@ pub fn complain(message: &str, mut arg1: &str) {
     syslog!(LOG_CRIT, "{} {}, {}", message, arg1, errmess);
 }
 
+// 第二个参数为NULL时，调用die函数。
 pub fn die(message: &str, arg1: &str) {
     complain(message, arg1);
     syslog!(LOG_CRIT, "FAILED to start up",);
     panic!("{}", message);
+}
+
+// 处理需要通过{} 传递参数的情况，两个参数
+// 第二个参数有值时，调用die宏
+#[macro_export]
+macro_rules! die {
+    ($message:expr, $arg1:expr) => {{
+        let errmess = std::io::Error::last_os_error().to_string();
+        if !errmess.is_empty() {
+            eprintln!("dnsmasq: error: {}", errmess);
+        }
+        eprintln!($message, $arg1);
+        syslog!(LOG_CRIT, $message, $arg1);
+        syslog!(LOG_CRIT, "FAILED to start up",);
+        panic!($message, $arg1);
+    }};
 }
