@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-extern crate libc;
 pub mod cache;
 pub mod dhcp;
 pub mod forward_init;
@@ -67,6 +66,7 @@ const IFPACKET: &str = "/usr/include/netpacket/packet.h";
 const IFBPF: &str = "/usr/include/linux/bpf.h";
 const OPT_DEBUG: u32 = 64;
 const LEASEFILE: Option<&str> = Some("/var/lib/misc/dnsmasq.leases");
+const VERSION: &str = "2.0";
 
 // 存储接口名称和地址
 #[derive(Clone)]
@@ -132,8 +132,8 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         args,
         &mut dnamebuff,
         Some(&mut resolv),
-        mxname,
-        mxtarget,
+        &mxname,
+        &mxtarget,
         &mut lease_file,
         &mut username,
         &mut groupname,
@@ -206,14 +206,14 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                     // iname.addr.in6.sin6_addr.s6_addr.to_string();
                 }
             }
-            // die("********* no interface with address", dnamebuff);
+            die("********* no interface with address", "");
         }
         if_tmp = &iname.next;
     }
 
     forward_init(true);
     let mut caches = Cache::new(cachesize, options & 4);
-
+    println!("aaaaaaaaaaaaa{:?}", caches);
     // 检查DHCP配置并验证必要的文件是否存在
     if dhcp.is_none() {
         let packet_path = IFPACKET;
@@ -232,7 +232,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                         SystemTime::now(),
                         &mut dhcp_conf,
                     );
-                    lease_update_dns(1);
+                    let _ = lease_update_dns(&mut caches, 1);
                     return 1;
                 }
 
@@ -249,9 +249,8 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             Ok(file) => Some(file),
             Err(_) => None,
         };
-        let i: i32 = 0;
         // 进程守护化
-        daemonize();
+        // daemonize();
         // 将进程的当前工作目录切换到根目录是守护进程通常的操作，避免锁定文件系统
         let _ = chdir("/");
         // 确保创建的文件权限符合系统和应用的安全要求
@@ -303,63 +302,65 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             }
         }
 
-        if let username = username {
+        if Some(username).is_some() {
             // 获取用户信息
             if let Some(user) = get_user_by_name(username) {
                 // 设置组ID
-                if let groupname = groupname {
+                if Some(groupname).is_some() {
                     if let Some(group) = get_group_by_name(groupname) {
                         let gid = Gid::from_raw(group.gid());
                         // 设置组ID
-                        if let Err(e) = setgid(gid) {
-                            // err!("Failed to set group ID: {}", e);
-                            exit(1);
+                        if let Err(_e) = setgid(gid) {
+                            die("Failed to set group ID: {}", &gid.to_string());
                         }
                     } else {
-                        // err!("Group not found: {}", groupname);
-                        exit(1);
+                        die("Group not found: {}", groupname);
                     }
                 } else {
                     // 如果没有提供组名，则使用用户的主组
                     let primary_gid = Gid::from_raw(user.primary_group_id());
-                    if let Err(e) = setgid(primary_gid) {
-                        // err!("Failed to set group ID: {}", e);
-                        exit(1);
+                    if let Err(_e) = setgid(primary_gid) {
+                        die("Failed to set group ID: {}", &primary_gid.to_string());
                     }
                 }
 
                 // 最后，设置用户ID
-                if let Err(e) = setuid(Uid::from_raw(user.uid())) {
-                    // err!("Failed to set user ID: {}", e);
-                    exit(1);
+                if let Err(_e) = setuid(Uid::from_raw(user.uid())) {
+                    die("Failed to set user ID: {}", &user.uid().to_string());
                 }
             } else {
-                // err("User not found: {}", username);
-                exit(1);
+                die("User not found: {}", username);
             }
         } else {
-            // err("Username cannot be None");
-            exit(1);
+            die("Username cannot be None", "");
         }
     }
 
-    /*  后面要补上
-        openlog("dnsmasq",
-    DNSMASQ_LOG_OPT(options & OPT_DEBUG),
-    DNSMASQ_LOG_FAC(options & OPT_DEBUG));
+    if Some(cachesize).is_some() {
+        syslog!(
+            LOG_INFO,
+            "started, version {}, cachesize {}",
+            VERSION,
+            cachesize
+        );
+    } else {
+        syslog!(LOG_INFO, "started, version {} cache disabled", VERSION);
+    }
 
-    if (cachesize)
-    syslog(LOG_INFO, "started, version %s cachesize %d", VERSION, cachesize);
-    else
-    syslog(LOG_INFO, "started, version %s cache disabled", VERSION);
-
-    if (options & OPT_LOCALMX)
-    syslog(LOG_INFO, "serving MX record for local hosts target %s", mxtarget);
-    else if (mxname)
-    syslog(LOG_INFO, "serving MX record for mailhost %s target %s",
-        mxname, mxtarget);
-    */
-
+    if Some(options & 1024).is_some() {
+        syslog!(
+            LOG_INFO,
+            "serving MX record for local hosts target {:?}",
+            mxtarget
+        );
+    } else if mxname.is_some() {
+        syslog!(
+            LOG_INFO,
+            "serving MX record for mailhost {:?} target {:?}",
+            mxname,
+            mxtarget
+        )
+    }
     let mut dhcp_tmp = &dhcp;
     while let Some(ref config) = dhcp_tmp {
         // 获取起始 IP 地址
@@ -372,18 +373,12 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             format!("{}s", config.lease_time)
         };
 
-        // 记录 DHCP 信息 syslog
-        // info!(
-        //     "DHCP on {}, IP range {} -- {}, lease time {}",
-        //     config.iface, dnamebuff, config.end, packet
-        // );
-
         // 移动到下一个配置
         dhcp_tmp = &config.next;
     }
 
     if getuid().is_root() || geteuid().is_root() {
-        // syslog("failed to drop root privs for user");
+        complain("failed to drop root privs for user", "");
     }
 
     let servers = check_servers(serv_addrs, &interfaces, &mut sfds);
@@ -397,6 +392,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                 domain_suffix.clone(),
                 addn_hosts.as_ref().map(|x| x.as_str()),
             );
+            let _ = lease_update_dns(&mut caches, 1);
         }
     }
 
@@ -416,14 +412,9 @@ fn daemonize() {
         .stderr(File::open("/dev/null").unwrap()); // 将标准错误重定向到 /dev/null
 
     match daemonize.start() {
-        Ok(_) => {
-            loop {
-                // info!("Daemon is running...");
-            }
-        }
-        Err(e) => {
-            // warn!("Error starting daemon: {}", e);
-            exit(1);
+        Ok(_) => {}
+        Err(_e) => {
+            die("Error starting daemon: {}", "");
         }
     }
 }
