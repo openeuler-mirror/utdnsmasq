@@ -5,6 +5,7 @@
  */
 
 use crate::*;
+use cache::*;
 use dhcp::find_config;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, Seek, Write};
@@ -26,15 +27,15 @@ struct DhcpLease {
     fqdn: Option<String>,
     expires: u64, // 使用u64表示UNIX时间戳
     hwaddr: [u8; ETHER_ADDR_LEN],
-    addr: Ipv4Addr,
+    addr: AllAddr,
     next: Option<Box<DhcpLease>>,
 }
 
 pub fn lease_init(
     filename: Option<&str>,
     domain: Option<String>,
-    buff: Vec<u8>,
-    buff2: Vec<u8>,
+    _buff: Vec<u8>,
+    _buff2: Vec<u8>,
     now: SystemTime,
     dhcp_configs: &mut Option<Box<DhcpConfig>>,
 ) -> i32 {
@@ -65,10 +66,6 @@ pub fn lease_init(
         let e3 = u32::from_str_radix(parts[4], 16).unwrap();
         let e4 = u32::from_str_radix(parts[5], 16).unwrap();
         let e5 = u32::from_str_radix(parts[6], 16).unwrap();
-        let a0: u8 = parts[7].parse().unwrap();
-        let a1: u8 = parts[8].parse().unwrap();
-        let a2: u8 = parts[9].parse().unwrap();
-        let a3: u8 = parts[10].parse().unwrap();
         let buff = parts[11].as_bytes().to_vec();
         let buff2 = parts[12].as_bytes().to_vec();
 
@@ -84,7 +81,7 @@ pub fn lease_init(
             hwaddr: [e0 as u8, e1 as u8, e2 as u8, e3 as u8, e4 as u8, e5 as u8],
             hostname: None,
             fqdn: None,
-            addr: Ipv4Addr::new(a0, a1, a2, a3),
+            addr: AllAddr::Addr4(Ipv4Addr::new(0, 0, 0, 0)),
             expires: ei,
             next: None,
         });
@@ -179,7 +176,7 @@ fn lease_set_hostname(name: Option<&str>, suffix: Option<String>, leases: &mut B
 }
 
 // 更新 DHCP 租约文件和 DNS 缓存：
-pub fn lease_update_dns(force_dns: i32) -> io::Result<()> {
+pub fn lease_update_dns(caches: &mut Cache, force_dns: i32) -> io::Result<()> {
     unsafe {
         // 检查是否需要更新文件
         if FILE_DIRTY.is_some() {
@@ -199,7 +196,7 @@ pub fn lease_update_dns(force_dns: i32) -> io::Result<()> {
                 // 写入租约基本信息
                 write!(
                     lease_file,
-                    "{} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} {} {} ",
+                    "{} {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} {:?} {} ",
                     lease.expires,
                     lease.hwaddr[0],
                     lease.hwaddr[1],
@@ -238,16 +235,17 @@ pub fn lease_update_dns(force_dns: i32) -> io::Result<()> {
             while let Some(lease) = lease_opt {
                 if let Some(ref fqdn) = lease.fqdn {
                     // 如果有 FQDN，添加到缓存
-                    cache_add_dhcp_entry(fqdn, &lease.addr, lease.expires, true);
+                    cache_add_dhcp_entry(fqdn, lease.addr.clone(), lease.expires, 4, caches);
                     cache_add_dhcp_entry(
                         lease.hostname.as_deref().unwrap_or("*"),
-                        &lease.addr,
+                        lease.addr.clone(),
                         lease.expires,
-                        false,
+                        0,
+                        caches,
                     );
                 } else if let Some(ref hostname) = lease.hostname {
                     // 只添加 hostname
-                    cache_add_dhcp_entry(hostname, &lease.addr, lease.expires, true);
+                    cache_add_dhcp_entry(hostname, lease.addr.clone(), lease.expires, 4, caches);
                 }
 
                 // 继续遍历链表
@@ -264,12 +262,4 @@ pub fn lease_update_dns(force_dns: i32) -> io::Result<()> {
 // 清除 DNS 缓存中的 DHCP 条目
 fn cache_unhash_dhcp() {
     // 清除 DNS 缓存的操作
-}
-
-// 添加 DHCP 条目到 DNS 缓存
-fn cache_add_dhcp_entry(name: &str, addr: &Ipv4Addr, expires: u64, reverse: bool) {
-    println!(
-        "Added DNS entry: {} -> {}, expires at {}, reverse: {}",
-        name, addr, expires, reverse
-    );
 }

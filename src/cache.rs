@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use crate::logs::*;
 use crate::util::*;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
 use std::time::SystemTime;
 
 const MAXDNAME: usize = 1025;
@@ -24,6 +26,12 @@ const F_REVERSE: u32 = 512;
 const F_IPV4: u32 = 1024;
 const F_IPV6: u32 = 2048;
 const OPT_EXPAND: u32 = 1;
+const F_NEG: u32 = 32;
+const INADDRSZ: usize = 4;
+
+// 全局的 DHCP 缓存状态
+static mut DHCP_INUSE: Option<*mut Crec> = None; // 当前使用的 DHCP 条目
+static mut DHCP_SPARE: Option<*mut Crec> = None; // 可重用的 DHCP 条目
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AllAddr {
@@ -32,20 +40,20 @@ pub enum AllAddr {
 }
 
 // 定义 Bigname 结构体
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BigName {
     pub name: [char; MAXDNAME],     // 示例大名称
     pub next: Option<Box<BigName>>, // 自由列表
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Name {
     Sname([char; SMALLDNAME]),
     Bname(Box<BigName>),
     Namep(Box<String>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Crec {
     pub next: Option<*mut Crec>,
     pub prev: Option<*mut Crec>,
@@ -205,7 +213,7 @@ pub fn cache_reload(
     // 如果有 OPT_NO_HOSTS 选项且没有附加 hosts 文件
     if (opts & OPT_NO_HOSTS != 0) && addn_hosts.is_none() {
         if caches.cache_size > 0 {
-            // err("Cleared cache");
+            complain("Cleared cache", "");
         }
         return;
     }
@@ -214,7 +222,7 @@ pub fn cache_reload(
     if opts & OPT_NO_HOSTS == 0 {
         if let Err(err) = read_hostsfile(caches, HOSTSFILE, opts, &mut buff, &mut domain_suffix, 0)
         {
-            // err("Error reading hosts file: {}", err);
+            complain("Error reading hosts file: {}", &err.to_string());
         }
     }
 
@@ -228,7 +236,7 @@ pub fn cache_reload(
             &mut domain_suffix,
             F_ADDN.try_into().unwrap(),
         ) {
-            // eer("Error reading additional hosts file: {}", err);
+            complain("Error reading additional hosts file: {}", &err.to_string());
         }
     }
 }
@@ -239,7 +247,7 @@ fn read_hostsfile(
     filename: &str,
     opts: u32,
     buff: &mut Vec<u8>,
-    domain_suffix: &mut Option<String>,
+    _domain_suffix: &mut Option<String>,
     addn_flag: u16,
 ) -> io::Result<()> {
     let file = File::open(filename)?;
@@ -555,4 +563,172 @@ pub fn add_hosts_entry(
 
     // 添加到缓存中
     cache_hash(caches, Some(cache));
+}
+
+// 向缓存中添加新的条目
+pub fn cache_add_dhcp_entry(
+    host_name: &str,
+    host_address: AllAddr,
+    ttd: u64,
+    flags: u32,
+    caches: &mut Cache,
+) {
+    unsafe {
+        // 查找已存在的条目
+        if let Some(crecp) = cache_find_by_name(caches, None, host_name, SystemTime::now(), F_IPV4)
+        {
+            // 如果找到相同主机名的 DHCP 条目
+            if let Some(crec) = crecp.as_mut() {
+                let current_crec = &mut *crec; // 解引用裸指针
+                if current_crec.flags & F_NEG != 0 {
+                    // 如果有负缓存条目，先释放
+                    cache_scan_free(
+                        caches,
+                        Some(host_name),
+                        Some(&host_address),
+                        SystemTime::now(),
+                        F_IPV4,
+                    );
+                } else {
+                    // 找到相同主机名的 DHCP 条目，直接返回
+                    println!(
+                        "Ignoring DHCP lease for {} because it clashes with an existing entry.",
+                        host_name
+                    );
+                    return;
+                }
+            }
+        }
+
+        // 查找地址中的条目
+        // if let Some(crecp) = cache_find_by_addr(None, &host_address, F_IPV4) {
+        //     // 如果找到相同地址的 DHCP 条目
+        //     if let Some(crec) = crecp.as_mut() {
+        //         let current_crec = &mut *crec; // 解引用裸指针
+        //         if current_crec.flags & F_NEG != 0 {
+        //             cache_scan_free(caches, Some(host_name), Some(&host_address), SystemTime::now(), F_IPV4);
+        //         }
+        //     }
+        // }
+
+        // 创建新条目
+        let crec: *mut Crec = if let Some(spare) = DHCP_SPARE {
+            DHCP_SPARE = None; // 清空备用条目
+            spare // 使用备用条目
+        } else {
+            // 分配新条目
+            let new_crec = Box::new(Crec {
+                next: None,
+                prev: None,
+                hash_next: None,
+                ttd: SystemTime::now(),
+                addr: AllAddr::Addr4(Ipv4Addr::new(0, 0, 0, 0)), // 初始化为一个有效的 IPv4 地址
+                flags: 0,
+                name: Name::Sname(['\0'; SMALLDNAME]), // 默认初始化
+            });
+            Box::into_raw(new_crec) // 转换为裸指针
+        };
+
+        // 更新条目内容
+        if !crec.is_null() {
+            let current_crec = &mut *crec; // 解引用裸指针
+            current_crec.flags = F_DHCP | F_FORWARD | F_IPV4 | flags;
+            if ttd == 0 {
+                current_crec.flags |= F_IMMORTAL;
+            } else {
+                current_crec.ttd = SystemTime::now() + std::time::Duration::from_secs(ttd);
+            }
+            current_crec.addr = host_address; // 直接使用地址
+            current_crec.name = Name::Namep(Box::new(host_name.to_string())); // 转换为 String
+
+            // 将条目链接到 DHCP_INUSE 链表
+            current_crec.prev = DHCP_INUSE; // 连接到当前 DHCP 使用的条目
+            DHCP_INUSE = Some(crec); // 更新当前使用的 DHCP 条目
+        }
+    }
+}
+
+// 清理缓存中的过期或匹配特定条件的条目
+pub fn cache_scan_free(
+    cache: &mut Cache,
+    name: Option<&str>,
+    addr: Option<&AllAddr>,
+    now: SystemTime,
+    flags: u32,
+) {
+    unsafe {
+        let flags = flags & (F_FORWARD | F_REVERSE | F_IPV4 | F_IPV6);
+
+        // 处理 F_FORWARD 标志
+        if flags & F_FORWARD != 0 {
+            let up = hash_bucket(name.unwrap_or("*"), cache); // 获取对应的哈希桶指针
+            let mut crecp = *up;
+
+            while let Some(current_ptr) = crecp {
+                let current = &mut *current_ptr; // 解引用 Box
+
+                // 检查条目是否过期
+                if (!current.flags & F_IMMORTAL != 0
+                    && now
+                        .duration_since(current.ttd)
+                        .unwrap_or(Duration::new(1, 0))
+                        .as_secs()
+                        > 0)
+                    || (flags
+                        == (current.flags
+                            & (F_HOSTS | F_DHCP | F_FORWARD | F_REVERSE | F_IPV4 | F_IPV6))
+                        && hostname_isequal(&cache_get_name(Some(current)), name.unwrap_or("")))
+                {
+                    // 将下一个条目存储在临时变量中
+                    let next_ptr = current.hash_next; // 先保存下一个条目
+
+                    // 解除当前条目的链接
+                    Cache::cache_unlink(cache, current_ptr); // 从缓存中移除条目
+                                                             // cache_free(current_ptr); // 释放条目内存
+
+                    // 更新当前指针到下一个条目
+                    crecp = next_ptr; // 更新指向下一个条目
+                } else {
+                    crecp = current.hash_next; // 继续遍历下一个条目
+                }
+            }
+        } else {
+            // 处理没有 F_FORWARD 标志的情况
+            for i in 0..cache.hash_size {
+                let mut crecp = cache.hash_table[i].take(); // 获取当前哈希桶的条目
+                while let Some(current_ptr) = crecp {
+                    let current = &mut *current_ptr; // 解引用 Box
+
+                    // 检查条目是否过期
+                    if (!current.flags & F_IMMORTAL != 0
+                        && now
+                            .duration_since(current.ttd)
+                            .unwrap_or(Duration::new(1, 0))
+                            .as_secs()
+                            > 0)
+                        || (flags
+                            == (current.flags
+                                & (F_HOSTS | F_DHCP | F_FORWARD | F_REVERSE | F_IPV4 | F_IPV6))
+                            && addr.is_some()
+                            && current.addr == *addr.unwrap())
+                    {
+                        // 保存下一个条目
+                        let next_ptr = current.hash_next; // 先保存下一个条目
+
+                        // 解除当前条目的链接
+                        Cache::cache_unlink(cache, current_ptr); // 从缓存中移除条目
+                                                                 // cache_free(current_ptr); // 释放条目内存
+
+                        // 更新当前指针到下一个条目
+                        crecp = next_ptr; // 更新指向下一个条目
+                    } else {
+                        crecp = current.hash_next; // 继续遍历下一个条目
+                    }
+                }
+                let up = &mut cache.hash_table[i];
+                // 将当前哈希桶的条目重新放回 hash_table 中
+                *up = crecp;
+            }
+        }
+    }
 }
