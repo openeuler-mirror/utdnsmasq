@@ -213,7 +213,6 @@ fn start(argc: usize, args: Vec<String>) -> usize {
 
     forward_init(true);
     let mut caches = Cache::new(cachesize, options & 4);
-    println!("aaaaaaaaaaaaa{:?}", caches);
     // 检查DHCP配置并验证必要的文件是否存在
     if dhcp.is_none() {
         let packet_path = IFPACKET;
@@ -250,7 +249,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             Err(_) => None,
         };
         // 进程守护化
-        // daemonize();
+        daemonize();
         // 将进程的当前工作目录切换到根目录是守护进程通常的操作，避免锁定文件系统
         let _ = chdir("/");
         // 确保创建的文件权限符合系统和应用的安全要求

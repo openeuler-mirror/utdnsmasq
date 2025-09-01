@@ -229,7 +229,7 @@ pub fn lease_update_dns(caches: &mut Cache, force_dns: i32) -> io::Result<()> {
 
         // 检查是否需要更新 DNS 缓存
         if DNS_DIRTY.is_some() || force_dns != 0 {
-            cache_unhash_dhcp();
+            cache_unhash_dhcp(caches);
 
             let mut lease_opt = LEASES.as_deref();
             while let Some(lease) = lease_opt {
@@ -257,9 +257,4 @@ pub fn lease_update_dns(caches: &mut Cache, force_dns: i32) -> io::Result<()> {
     }
 
     Ok(())
-}
-
-// 清除 DNS 缓存中的 DHCP 条目
-fn cache_unhash_dhcp() {
-    // 清除 DNS 缓存的操作
 }

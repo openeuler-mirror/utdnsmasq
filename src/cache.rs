@@ -9,6 +9,7 @@ use crate::util::*;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::ptr::null_mut;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -17,8 +18,8 @@ const SMALLDNAME: usize = 40;
 const OPT_NO_HOSTS: u32 = 2;
 const HOSTSFILE: &str = "/etc/hosts";
 const F_ADDN: u32 = 1;
-const F_HOSTS: u32 = 64; // 标志，表示是 hosts
-const F_DHCP: u32 = 16; // 标志，表示是 DHCP
+const F_HOSTS: u32 = 64;
+const F_DHCP: u32 = 16;
 const F_BIGNAME: u32 = 512;
 const F_IMMORTAL: u32 = 128;
 const F_FORWARD: u32 = 256;
@@ -28,6 +29,7 @@ const F_IPV6: u32 = 2048;
 const OPT_EXPAND: u32 = 1;
 const F_NEG: u32 = 32;
 const INADDRSZ: usize = 4;
+const IN6ADDRSZ: usize = 16;
 
 // 全局的 DHCP 缓存状态
 static mut DHCP_INUSE: Option<*mut Crec> = None; // 当前使用的 DHCP 条目
@@ -523,6 +525,103 @@ pub fn cache_find_by_name(
     None
 }
 
+// 根据地址查找缓存中的条目
+pub fn cache_find_by_addr(
+    cache: &mut Cache,
+    crecp: Option<*mut Crec>,
+    addr: &AllAddr,
+    now: SystemTime,
+    prot: u32,
+) -> Option<*mut Crec> {
+    let _addrlen = if prot == F_IPV6 { IN6ADDRSZ } else { INADDRSZ };
+
+    // 定义一个可选的结果
+    let mut ans: Option<*mut Crec>;
+
+    // 如果在迭代中
+    if let Some(current_crec_ptr) = crecp {
+        ans = unsafe { (*current_crec_ptr).next }; // 获取下一个条目
+    } else {
+        // 第一次查找，遍历哈希表
+        ans = None; // 初始化答案
+
+        for i in 0..cache.hash_size {
+            let mut current_ptr = cache.hash_table[i]; // 获取当前哈希桶的条目
+
+            while let Some(current_crec_ptr) = current_ptr {
+                let current = unsafe { &mut *current_crec_ptr }; // 解引用裸指针
+
+                // 检查条目是否过期
+                if (current.flags & F_IMMORTAL != 0)
+                    || now
+                        .duration_since(current.ttd)
+                        .unwrap_or(Duration::new(0, 0))
+                        .as_secs()
+                        > 0
+                {
+                    // 条目过期，移除
+                    current_ptr = current.hash_next; // 更新链表指针
+                                                     // 在这里实现解绑和释放逻辑
+                    Cache::cache_unlink(cache, current_crec_ptr);
+                    unsafe { cache_free(cache, current_crec_ptr) };
+                } else {
+                    // 检查反向标志和地址匹配
+                    if (current.flags & F_REVERSE != 0)
+                        && (current.flags & prot != 0)
+                        && current.addr == *addr
+                    {
+                        // 有效条目
+                        ans = Some(current_crec_ptr); // 找到条目，保存结果
+                    }
+                    current_ptr = current.hash_next; // 更新链表指针
+                }
+            }
+        }
+    }
+
+    // 最后检查返回的答案
+    if let Some(ans_ptr) = ans {
+        let ans_ref = unsafe { &mut *ans_ptr };
+        if (ans_ref.flags & F_REVERSE != 0) && (ans_ref.flags & prot != 0) && &ans_ref.addr == addr
+        {
+            return Some(ans_ptr);
+        }
+    }
+
+    None
+}
+
+// 将一个缓存条目 crecp 释放并重新插入到缓存链表中
+pub unsafe fn cache_free(cache: &mut Cache, crecp: *mut Crec) {
+    // 将 crecp 转换为可变引用
+    let crecp_ref = &mut *crecp;
+
+    // 清除转发和反向标志
+    crecp_ref.flags &= !F_FORWARD;
+    crecp_ref.flags &= !F_REVERSE;
+
+    // 将条目添加到缓存尾部
+    if let Some(tail_ptr) = cache.cache_tail {
+        let tail_ref = &mut *tail_ptr; // 解引用尾部
+        tail_ref.next = Some(crecp); // 设置当前条目为新的下一个
+    } else {
+        cache.cache_head = Some(crecp); // 如果缓存为空，将其设为头部
+    }
+
+    crecp_ref.prev = cache.cache_tail; // 将前驱设置为当前尾部
+    crecp_ref.next = Some(null_mut()); // 设置下一个为 null
+    cache.cache_tail = Some(crecp); // 更新尾部为当前条目
+
+    // 处理大名称的存储
+    if crecp_ref.flags & F_BIGNAME != 0 {
+        if let Name::Bname(ref mut big_name) = crecp_ref.name {
+            big_name.next = cache.big_free.take(); // 取出现有的空闲大名称
+            cache.big_free = Some(big_name.clone()); // 将当前的 big_name 赋值给空闲列表
+            crecp_ref.flags &= !F_BIGNAME; // 清除大名称标志
+        }
+    }
+}
+
 // 缓存中添加主机条目
 pub fn add_hosts_entry(
     caches: &mut Cache,
@@ -601,15 +700,23 @@ pub fn cache_add_dhcp_entry(
         }
 
         // 查找地址中的条目
-        // if let Some(crecp) = cache_find_by_addr(None, &host_address, F_IPV4) {
-        //     // 如果找到相同地址的 DHCP 条目
-        //     if let Some(crec) = crecp.as_mut() {
-        //         let current_crec = &mut *crec; // 解引用裸指针
-        //         if current_crec.flags & F_NEG != 0 {
-        //             cache_scan_free(caches, Some(host_name), Some(&host_address), SystemTime::now(), F_IPV4);
-        //         }
-        //     }
-        // }
+        if let Some(crecp) =
+            cache_find_by_addr(caches, None, &host_address, SystemTime::now(), F_IPV4)
+        {
+            // 如果找到相同地址的 DHCP 条目
+            if let Some(crec) = crecp.as_mut() {
+                let current_crec = &mut *crec; // 解引用裸指针
+                if current_crec.flags & F_NEG != 0 {
+                    cache_scan_free(
+                        caches,
+                        Some(host_name),
+                        Some(&host_address),
+                        SystemTime::now(),
+                        F_IPV4,
+                    );
+                }
+            }
+        }
 
         // 创建新条目
         let crec: *mut Crec = if let Some(spare) = DHCP_SPARE {
@@ -730,5 +837,42 @@ pub fn cache_scan_free(
                 *up = crecp;
             }
         }
+    }
+}
+
+//从缓存中移除所有 DHCP 条目
+pub fn cache_unhash_dhcp(cache: &mut Cache) {
+    // 从哈希表中移除所有 DHCP 条目
+    for i in 0..cache.hash_size {
+        let mut current = cache.hash_table[i].take(); // 获取当前哈希桶的条目
+        let mut up = &mut cache.hash_table[i]; // 指向当前哈希桶的指针
+
+        while let Some(crecp) = current {
+            // 解引用 crecp 为 Box<Crec>，并访问字段
+            unsafe {
+                if (*crecp).flags & F_DHCP != 0 {
+                    // 移除 DHCP 条目
+                    current = (*crecp).hash_next.take(); // 更新到下一个条目
+                    *up = (*crecp).next.take(); // 从链表中移除
+                } else {
+                    up = &mut (*crecp).hash_next; // 更新指向当前条目的下一个
+                    current = (*crecp).hash_next; // 继续遍历下一个条目
+                }
+            }
+        }
+    }
+
+    // 将当前 DHCP 条目移动到备用列表
+    let mut current = cache.dhcp_inuse.take(); // 获取当前 DHCP 条目
+    cache.dhcp_inuse = None; // 清空当前 DHCP 条目
+
+    while let Some(crecp_ptr) = current {
+        // 使用 unsafe 解引用裸指针
+        let crecp = unsafe { &mut *crecp_ptr };
+        current = crecp.next.take(); // 保存下一个条目
+
+        // 将当前条目添加到备用列表
+        crecp.next = cache.dhcp_spare.take(); // 将当前条目链接到备用列表
+        cache.dhcp_spare = Some(crecp_ptr); // 更新备用列表
     }
 }
