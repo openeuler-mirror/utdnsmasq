@@ -67,6 +67,8 @@ const IFBPF: &str = "/usr/include/linux/bpf.h";
 const OPT_DEBUG: u32 = 64;
 const LEASEFILE: Option<&str> = Some("/var/lib/misc/dnsmasq.leases");
 const VERSION: &str = "2.0";
+const OPT_NO_POLL: u32 = 32;
+const OPT_LOG: u32 = 4;
 
 // 存储接口名称和地址
 #[derive(Clone)]
@@ -381,7 +383,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     }
 
     let servers = check_servers(serv_addrs, &interfaces, &mut sfds);
-    let last_server = servers.clone();
+    let mut last_server = servers.clone();
     while !SIGTERM_FLAG.load(Ordering::Relaxed) {
         if SIGHUP_FLAG.load(Ordering::Relaxed) {
             cache_reload(
@@ -392,6 +394,27 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                 addn_hosts.as_ref().map(|x| x.as_str()),
             );
             let _ = lease_update_dns(&mut caches, 1);
+        }
+        if resolv.file.is_some() && (options & OPT_NO_POLL) != 0 {
+            // servers = check_servers(
+            //     reload_servers(
+            //         resolv.as_ref().unwrap().name.as_str(),
+            //         &dnamebuff,
+            //         servers.clone(),
+            //         query_port,
+            //     ),
+            //     &interfaces,
+            //     &mut sfds,
+            // );
+            // let mut laster_server = servers.clone();
+            SIGHUP_FLAG.store(false, Ordering::SeqCst);
+        }
+
+        if SIGUSR1_FLAG.load(Ordering::SeqCst) {
+            dump_cache(
+                (options & (OPT_DEBUG | OPT_LOG)).try_into().unwrap(),
+                &caches,
+            );
         }
     }
 
