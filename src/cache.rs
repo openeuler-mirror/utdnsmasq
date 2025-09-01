@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::logs::*;
 use crate::util::*;
+use crate::*;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -874,5 +874,65 @@ pub fn cache_unhash_dhcp(cache: &mut Cache) {
         // 将当前条目添加到备用列表
         crecp.next = cache.dhcp_spare.take(); // 将当前条目链接到备用列表
         cache.dhcp_spare = Some(crecp_ptr); // 更新备用列表
+    }
+}
+
+pub fn dump_cache(debug: i32, cache: &Cache) {
+    unsafe {
+        let cache_size = cache.cache_size;
+        let cache_live_freed = cache.cache_live_freed;
+        let cache_inserted = cache.cache_inserted;
+        syslog!(
+            LOG_INFO,
+            "Cache size {:?}, {:?}/{:?} cache insertions re-used unexpired cache entries.",
+            cache_size,
+            cache_live_freed,
+            cache_inserted
+        );
+
+        if debug != 0 {
+            syslog!(LOG_DEBUG, "Host                                     Address                        Flags     Expires", );
+
+            // 遍历哈希表
+            for entry in &cache.hash_table {
+                let mut cache_entry = *entry; // 解引用以获得指针
+                while let Some(c) = cache_entry {
+                    let c_ref: &Crec = &*c; // 解引用获取 Crec 结构体
+
+                    let addrbuff = match c_ref.addr {
+                        AllAddr::Addr4(addr) => format!("{}", addr),
+                        AllAddr::Addr6(addr) => format!("{}", addr),
+                    };
+
+                    // 构建标志字符串
+                    let flags_str = format!(
+                        "{}{}{}{}{}{}{}{}{}{}",
+                        if c_ref.flags & 128 != 0 { "4" } else { "" }, // F_IPV4
+                        if c_ref.flags & 256 != 0 { "6" } else { "" }, // F_IPV6
+                        if c_ref.flags & 8 != 0 { "F" } else { " " },  // F_FORWARD
+                        if c_ref.flags & 4 != 0 { "R" } else { " " },  // F_REVERSE
+                        if c_ref.flags & 1 != 0 { "I" } else { " " },  // F_IMMORTAL
+                        if c_ref.flags & 16 != 0 { "D" } else { " " }, // F_DHCP
+                        if c_ref.flags & 32 != 0 { "N" } else { " " }, // F_NEG
+                        if c_ref.flags & 64 != 0 { "H" } else { " " }, // F_HOSTS
+                        if c_ref.flags & 8192 != 0 { "X" } else { " " }, // F_NXDOMAIN
+                        if c_ref.flags & 16384 != 0 { "A" } else { " " }, // F_ADDN
+                    );
+
+                    // 获取名称的字符串表示
+                    let name_str = match &c_ref.name {
+                        Name::Sname(name) => name.iter().collect::<String>(),
+                        Name::Bname(bigname) => bigname.name.iter().collect::<String>(),
+                        Name::Namep(name) => *name.clone(),
+                    };
+
+                    // 打印缓存条目信息
+                    syslog!(LOG_DEBUG, "{:<40} {:<30} {}", name_str, addrbuff, flags_str);
+
+                    // 获取下一个缓存条目
+                    cache_entry = c_ref.hash_next;
+                }
+            }
+        }
     }
 }
