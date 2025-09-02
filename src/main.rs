@@ -179,7 +179,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         &mut interfaces,
         if_names.clone(),
         if_addrs.clone(),
-        if_except,
+        if_except.clone(),
         &mut dhcp,
         port,
     );
@@ -415,6 +415,27 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                 (options & (OPT_DEBUG | OPT_LOG)).try_into().unwrap(),
                 &caches,
             );
+            SIGUSR1_FLAG.store(false, Ordering::SeqCst);
+        }
+
+        if SIGUSR2_FLAG.load(Ordering::SeqCst) {
+            if getuid().as_raw() != 0 && port <= 1024 {
+                syslog!(LOG_ERR, "cannot re-scan interfaces unless --user=root",);
+            } else {
+                complain("rescanning network interfaces", "");
+                let int_err_string = enumerate_interfaces(
+                    &mut interfaces,
+                    if_names.clone(),
+                    if_addrs.clone(),
+                    if_except.clone(),
+                    &mut dhcp,
+                    port,
+                );
+                if int_err_string.is_err() {
+                    syslog!(LOG_ERR, "Error: {:?}", int_err_string);
+                }
+            }
+            SIGUSR2_FLAG.store(false, Ordering::SeqCst);
         }
     }
 

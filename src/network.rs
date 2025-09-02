@@ -297,7 +297,11 @@ pub fn check_servers(
         }
 
         if iface_found {
-            // warn!("Ignoring nameserver {} - local interface", addr_str);
+            syslog!(
+                LOG_WARNING,
+                "Ignoring nameserver {} - local interface",
+                addr_str
+            );
             new = server.next.take();
             continue;
         }
@@ -307,7 +311,11 @@ pub fn check_servers(
             if let Some(sfd) = allocate_sfd(&server.source_addr, sfds) {
                 server.sfd = Some(sfd);
             } else {
-                // warn!("Ignoring nameserver {} - cannot make/bind socket", addr_str);
+                syslog!(
+                    LOG_WARNING,
+                    "Ignoring nameserver {} - cannot make/bind socket",
+                    addr_str
+                );
                 new = server.next.take();
                 continue;
             }
@@ -319,7 +327,7 @@ pub fn check_servers(
         ret = Some(server.clone());
         new = next;
 
-        // info("Using nameserver {}#{}", addr_str, port);
+        syslog!(LOG_INFO, "Using nameserver {}#{}", addr_str, port);
     }
 
     ret
@@ -370,7 +378,7 @@ pub fn allocate_sfd(source_addr: &MySockAddr, sfds: &mut VecDeque<ServerFd>) -> 
             Some(sfd)
         }
         Err(err) => {
-            // warn!("Failed to create socket: {}", err);
+            syslog!(LOG_WARNING, "Failed to create socket: {}", err);
             None
         }
     }
