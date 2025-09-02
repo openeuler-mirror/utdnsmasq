@@ -17,21 +17,21 @@ use daemonize::Daemonize;
 use forward_init::*;
 use lease::*;
 use logs::*;
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use network::*;
+use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, SigmaskHow, Signal};
 use nix::sys::stat::{umask, Mode};
 use nix::unistd::{chdir, close, geteuid, getuid, setgid, setuid, Gid, Uid};
 use option::*;
-use signal_hook::consts::signal::*;
-use signal_hook::iterator::Signals;
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
-use std::{env, fs, process, thread};
+use std::time::{Duration, SystemTime};
+use std::{env, fs, process};
 use users::{get_group_by_name, get_user_by_name};
 
 // 全局标志变量，使用 AtomicBool 来保证线程安全
@@ -40,16 +40,13 @@ static SIGUSR1_FLAG: AtomicBool = AtomicBool::new(false);
 static SIGUSR2_FLAG: AtomicBool = AtomicBool::new(false);
 static SIGTERM_FLAG: AtomicBool = AtomicBool::new(false);
 
-fn sig_handler(mut signals: Signals) {
-    // 处理信号，将信号标志设置为 true
-    for sig in signals.forever() {
-        match sig {
-            SIGTERM => SIGTERM_FLAG.store(true, Ordering::SeqCst),
-            SIGHUP => SIGHUP_FLAG.store(true, Ordering::SeqCst),
-            SIGUSR1 => SIGUSR1_FLAG.store(true, Ordering::SeqCst),
-            SIGUSR2 => SIGUSR2_FLAG.store(true, Ordering::SeqCst),
-            _ => {}
-        }
+extern "C" fn sig_handler(sig: i32) {
+    match sig {
+        libc::SIGTERM => SIGTERM_FLAG.store(true, Ordering::SeqCst),
+        libc::SIGHUP => SIGHUP_FLAG.store(true, Ordering::SeqCst),
+        libc::SIGUSR1 => SIGUSR1_FLAG.store(true, Ordering::SeqCst),
+        libc::SIGUSR2 => SIGUSR2_FLAG.store(true, Ordering::SeqCst),
+        _ => {}
     }
 }
 
@@ -122,12 +119,32 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
     let leasefd: i32 = 0;
     let serverfdp: Option<Box<ServerFd>> = None;
-    let mut sfds: VecDeque<ServerFd> = VecDeque::new();
+    let mut sfds: Option<Box<ServerFd>> = None;
 
-    let signals = Signals::new(&[SIGUSR1, SIGUSR2, SIGHUP, SIGTERM]).unwrap();
-    let signals_handle = thread::spawn(move || {
-        sig_handler(signals);
-    });
+    // 创建并初始化 SigSet，用于阻塞信号
+    let mut sigset = SigSet::empty();
+    sigset.add(Signal::SIGUSR1);
+    sigset.add(Signal::SIGUSR2);
+    sigset.add(Signal::SIGTERM);
+    sigset.add(Signal::SIGHUP);
+
+    // 定义信号处理程序，相当于 sigaction
+    let sigact = SigAction::new(
+        SigHandler::Handler(sig_handler),
+        SaFlags::empty(),
+        SigSet::empty(), // 初始化并清空信号集
+    );
+
+    // 注册信号和处理程序
+    unsafe {
+        signal::sigaction(Signal::SIGUSR1, &sigact).expect("无法注册 SIGUSR1");
+        signal::sigaction(Signal::SIGUSR2, &sigact).expect("无法注册 SIGUSR2");
+        signal::sigaction(Signal::SIGHUP, &sigact).expect("无法注册 SIGHUP");
+        signal::sigaction(Signal::SIGTERM, &sigact).expect("无法注册 SIGTERM");
+    }
+
+    // 阻塞信号集中的所有信号，相当于 sigprocmask(SIG_BLOCK, &sigact.sa_mask, &sigmask)
+    signal::sigprocmask(SigmaskHow::SIG_BLOCK, Some(&sigset), None).expect("无法阻塞信号");
 
     let options = read_opts(
         argc,
@@ -384,7 +401,14 @@ fn start(argc: usize, args: Vec<String>) -> usize {
 
     let servers = check_servers(serv_addrs, &interfaces, &mut sfds);
     let mut last_server = servers.clone();
+
     while !SIGTERM_FLAG.load(Ordering::Relaxed) {
+        // 创建 Poll 实例
+        let mut poll = Poll::new().expect("无法创建 Poll 实例");
+
+        // 创建一个容量为 128 的 Events 集合，类似于 fd_set
+        let mut events = Events::with_capacity(128);
+        // fd_set events;
         if SIGHUP_FLAG.load(Ordering::Relaxed) {
             cache_reload(
                 &mut caches,
@@ -437,10 +461,125 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             }
             SIGUSR2_FLAG.store(false, Ordering::SeqCst);
         }
+
+        if !first_loop {
+            // 用于跟踪最大文件描述符
+            let mut maxfd = 0;
+
+            // 遍历链表，将每个文件描述符注册到 Poll 中
+            let mut serverfdp = sfds.as_deref();
+            while let Some(server) = serverfdp {
+                let raw_fd = server.fd;
+
+                // 注册文件描述符到 poll，相当于 FD_SET
+                poll.registry()
+                    .register(
+                        &mut SourceFd(&raw_fd),
+                        Token(raw_fd as usize),
+                        Interest::READABLE,
+                    )
+                    .expect("无法注册 fd");
+
+                // 更新最大文件描述符
+                if raw_fd > maxfd {
+                    maxfd = raw_fd;
+                }
+
+                // 移动到下一个节点
+                serverfdp = server.next.as_deref();
+            }
+
+            let mut iface = interfaces.as_deref_mut();
+            while let Some(interface) = iface {
+                let raw_fd = interface.fd;
+
+                // 如果文件描述符有效，将其注册到 poll
+                if interface.valid {
+                    poll.registry()
+                        .register(
+                            &mut SourceFd(&raw_fd),
+                            Token(raw_fd as usize),
+                            Interest::READABLE,
+                        )
+                        .expect("无法注册文件描述符");
+
+                    // 更新最大文件描述符
+                    if raw_fd > maxfd {
+                        maxfd = raw_fd;
+                    }
+                }
+
+                // 移动到下一个节点
+                iface = interface.next.as_deref_mut();
+            }
+
+            // 遍历链表，将每个文件描述符注册到 Poll 中
+            let mut dhcp_tmp = dhcp.as_deref_mut();
+            while let Some(dhcp_entry) = dhcp_tmp {
+                let raw_fd = dhcp_entry.fd;
+
+                // 将文件描述符注册到 Poll 中，相当于 FD_SET
+                poll.registry()
+                    .register(
+                        &mut SourceFd(&raw_fd),
+                        Token(raw_fd as usize),
+                        Interest::READABLE,
+                    )
+                    .expect("无法注册文件描述符");
+
+                // 更新最大文件描述符
+                if raw_fd > maxfd {
+                    maxfd = raw_fd;
+                }
+
+                // 移动到下一个节点
+                dhcp_tmp = dhcp_entry.next.as_deref_mut();
+            }
+
+            // 条件编译：如果支持 `pselect`
+            #[cfg(feature = "pselect")]
+            {
+                // 使用 `pselect` 等效实现
+                // 设置信号掩码以阻塞信号
+                signal::sigprocmask(SigmaskHow::SIG_SETMASK, Some(&sigset), None)
+                    .expect("无法设置信号掩码");
+
+                // 调用 `poll.poll` 来等待事件，相当于 `pselect`
+                if poll
+                    .poll(&mut events, Some(Duration::from_secs(5)))
+                    .is_err()
+                {
+                    events = Events::with_capacity(128); // 如果出错，清空 events
+                }
+
+                // 恢复原始信号掩码
+                signal::sigprocmask(SigmaskHow::SIG_SETMASK, None, Some(&mut sigset))
+                    .expect("无法恢复信号掩码");
+            }
+
+            // 如果不支持 `pselect`，则使用 `select` 的等效实现
+            #[cfg(not(feature = "pselect"))]
+            {
+                // 保存当前的信号掩码
+                let mut save_mask = SigSet::empty();
+                signal::sigprocmask(SigmaskHow::SIG_SETMASK, Some(&sigset), Some(&mut save_mask))
+                    .expect("无法设置信号掩码");
+
+                // 使用 `poll.poll` 等效 `select` 实现
+                if poll
+                    .poll(&mut events, Some(Duration::from_secs(5)))
+                    .is_err()
+                {
+                    events = Events::with_capacity(128); // 如果出错，清空 events
+                }
+
+                // 恢复保存的信号掩码
+                signal::sigprocmask(SigmaskHow::SIG_SETMASK, Some(&save_mask), None)
+                    .expect("无法恢复信号掩码");
+            }
+        }
     }
 
-    // 退出前加入信号处理线程
-    // signals_handle.join().unwrap();
     0
 }
 
