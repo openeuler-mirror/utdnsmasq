@@ -82,7 +82,7 @@ pub struct Iname {
 pub struct ServerFd {
     pub fd: i32,
     pub source_addr: MySockAddr,
-    pub next: Option<Arc<ServerFd>>,
+    pub next: Option<Box<ServerFd>>,
 }
 
 #[derive(Clone)]

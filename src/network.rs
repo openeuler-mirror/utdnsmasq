@@ -8,7 +8,6 @@ use crate::*;
 use forward_init::*;
 use get_if_addrs::{get_if_addrs, IfAddr, Interface};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::os::unix::io::AsRawFd; // 用于获取文件描述符
 use util::*;
@@ -246,7 +245,7 @@ fn get_network_interfaces() -> Vec<Interface> {
 pub fn check_servers(
     mut new: Option<Box<Server>>,
     interfaces: &Option<Box<Irec>>,
-    sfds: &mut VecDeque<ServerFd>,
+    sfds: &mut Option<Box<ServerFd>>,
 ) -> Option<Box<Server>> {
     let mut ret: Option<Box<Server>> = None;
 
@@ -333,11 +332,14 @@ pub fn check_servers(
     ret
 }
 
-pub fn allocate_sfd(source_addr: &MySockAddr, sfds: &mut VecDeque<ServerFd>) -> Option<ServerFd> {
+pub fn allocate_sfd(
+    source_addr: &MySockAddr,
+    sfds: &mut Option<Box<ServerFd>>,
+) -> Option<ServerFd> {
     // 首先检查是否已有合适的文件描述符
     for sfd in sfds.iter() {
         if sockaddr_isequal(&sfd.source_addr, source_addr) {
-            return Some(sfd.clone());
+            return Some(*sfd.clone());
         }
     }
 
@@ -373,8 +375,6 @@ pub fn allocate_sfd(source_addr: &MySockAddr, sfds: &mut VecDeque<ServerFd>) -> 
     match UdpSocket::bind(socket_addr) {
         Ok(sock) => {
             sfd.fd = sock.as_raw_fd(); // 获取文件描述符
-                                       // 将新的 ServerFd 添加到 sfds 中
-            sfds.push_back(sfd.clone());
             Some(sfd)
         }
         Err(err) => {
