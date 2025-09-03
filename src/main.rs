@@ -30,7 +30,7 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs, process};
 use users::{get_group_by_name, get_user_by_name};
 
@@ -86,17 +86,17 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut cachesize: usize = CACHESIZ; // 缓存大小，默认值为 CACHESIZ
     let mut port: u16 = NAMESERVER_PORT; // 名称服务器端口，默认为 NAMESERVER_PORT
     let mut query_port: i32 = 0; // 查询端口，初始值为0
-    let first_loop: bool = true;
+    let mut first_loop: bool = true;
     let mut local_ttl: u64 = 0; // 本地缓存 TTL，初始值为 0
     let runfile: Option<&str> = RUNFILE; // 进程 PID 文件路径，默认为 RUNFILE
 
     let mut interfaces: Option<Box<Irec>> = None;
     // 时间戳相关变量
-    let resolv_changed: u64 = 0;
-    let now: u64 = 0;
-    let last: u64 = 0;
+    let mut resolv_changed: Option<SystemTime> = None;
+    let mut now: SystemTime = SystemTime::now();
+    let mut last: Option<SystemTime> = None;
     // 邮件交换相关变量
-    let mut resolv = Resolv::default();
+    let mut resolv: Option<Box<ResolvC>> = None;
     let mut dhcp: Option<Box<DhcpContext>> = None;
     let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
     let dhcp_opts: Option<Box<DhcpOpt>> = None;
@@ -150,7 +150,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         argc,
         args,
         &mut dnamebuff,
-        Some(&mut resolv),
+        &resolv,
         &mxname,
         &mxtarget,
         &mut lease_file,
@@ -419,7 +419,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             );
             let _ = lease_update_dns(&mut caches, 1);
         }
-        if resolv.file.is_some() && (options & OPT_NO_POLL) != 0 {
+        if resolv.is_some() && (options & OPT_NO_POLL) != 0 {
             // servers = check_servers(
             //     reload_servers(
             //         resolv.as_ref().unwrap().name.as_str(),
@@ -576,6 +576,75 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                 // 恢复保存的信号掩码
                 signal::sigprocmask(SigmaskHow::SIG_SETMASK, Some(&save_mask), None)
                     .expect("无法恢复信号掩码");
+            }
+        }
+
+        first_loop = false;
+
+        now = SystemTime::now();
+        if last.map_or(true, |last_time| {
+            now.duration_since(last_time).unwrap_or(Duration::ZERO) > Duration::from_secs(1)
+        }) {
+            last = Some(now);
+            if options & OPT_NO_POLL == 0 {
+                // 用于记录最近修改的文件信息
+                let mut latest: Option<ResolvC> = None;
+                let mut last_change = UNIX_EPOCH;
+
+                let mut f_resolv = resolv.as_deref_mut();
+                while let Some(resolv) = f_resolv {
+                    if let Some(ref name) = &resolv.name {
+                        let path = Path::new(name);
+                        match fs::metadata(path) {
+                            Ok(metadata) => {
+                                // 获取文件的最后修改时间
+                                let modified_time = metadata.modified().unwrap_or(UNIX_EPOCH);
+                                // 更新 `logged` 状态
+                                resolv.logged = false;
+                                if modified_time > last_change {
+                                    last_change = modified_time;
+                                    latest = Some(resolv.clone());
+                                }
+                            }
+                            Err(e) => {
+                                if !resolv.logged {
+                                    syslog!(
+                                        LOG_WARNING,
+                                        "Warning: failed to access {}: {}",
+                                        name,
+                                        e
+                                    );
+                                }
+                                resolv.logged = true;
+                            }
+                        }
+                    } else {
+                        // 如果 `name` 是 `None`，输出警告并标记为 `logged`
+                        if !resolv.logged {
+                            syslog!(
+                                LOG_WARNING,
+                                "Warning: file name is missing for f_resolv node.",
+                            );
+                        }
+                        resolv.logged = true;
+                    }
+
+                    // 移动到下一个节点
+                    f_resolv = resolv.next.as_deref_mut();
+                }
+                if let Some(latest) = latest {
+                    if last_change > resolv_changed.expect("REASON") {
+                        resolv_changed = Some(last_change);
+
+                        if let Some(name) = &latest.name {
+                            // servers = check_servers(
+                            //     reload_servers(name, &mut dnamebuff, servers, query_port),
+                            //     &interfaces,
+                            //     &mut sfds,
+                            // );
+                        }
+                    }
+                }
             }
         }
     }

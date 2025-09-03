@@ -4,20 +4,13 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use std::clone;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 pub type SaFamilyT = u16;
 pub type InPortT = u16;
 pub type InAddrT = u32;
-
-#[derive(Default, Clone)]
-pub struct Resolv {
-    pub file: Option<String>,
-    pub valid: u8,
-    pub serial: u32,
-    pub filename: &'static str,
-}
 
 pub struct BogusAddr {
     pub addr: InAddr,
@@ -95,7 +88,7 @@ pub struct Server {
     pub next: Option<Box<Server>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolvC {
     pub next: Option<Box<ResolvC>>,
     pub is_default: bool,
@@ -144,7 +137,7 @@ pub fn read_opts(
     argc: usize,
     argv: Vec<String>,
     buff: &mut [u8],
-    resolv_file: Option<&mut Resolv>,
+    resolv_file: &Option<Box<ResolvC>>,
     mxname: &Option<&mut String>,
     mxtarget: &Option<&mut String>,
     lease_file: &Option<&str>,
