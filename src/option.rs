@@ -4,14 +4,13 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use std::clone;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 
 pub type SaFamilyT = u16;
 pub type InPortT = u16;
 pub type InAddrT = u32;
 
+#[derive(Clone)]
 pub struct BogusAddr {
     pub addr: InAddr,
     pub next: Option<Box<BogusAddr>>,
@@ -148,7 +147,7 @@ pub fn read_opts(
     if_names: &Option<Box<Iname>>,
     if_addrs: &Option<Box<Iname>>,
     if_except: &Option<Box<Iname>>,
-    bogus_addr: Option<&mut BogusAddr>,
+    bogus_addr: &Option<Box<BogusAddr>>,
     serv_addrs: &Option<Box<Server>>,
     cachesize: Option<&mut usize>,
     port: Option<&mut u16>,

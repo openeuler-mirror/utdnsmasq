@@ -110,12 +110,12 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let if_names: Option<Box<Iname>> = None; // 用于存储接口名称
     let if_addrs: Option<Box<Iname>> = None; // 用于存储接口地址
     let if_except: Option<Box<Iname>> = None; // 用于存储例外情况
-    let bogus_addr: Option<&mut BogusAddr> = None;
+    let bogus_addr: Option<Box<BogusAddr>> = None;
     let dhcp_sname: Option<&mut String> = None;
     let dhcp_file: Option<&mut String> = Default::default();
     let serv_addrs: Option<Box<Server>> = None;
     let mut dnamebuff = vec![0u8; MAXDNAME];
-    let packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
+    let mut packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
     let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
     let leasefd: i32 = 0;
     let serverfdp: Option<Box<ServerFd>> = None;
@@ -161,7 +161,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         &if_names,
         &if_addrs,
         &if_except,
-        bogus_addr,
+        &bogus_addr,
         &serv_addrs,
         Some(&mut cachesize),
         Some(&mut port),
@@ -645,6 +645,44 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                         }
                     }
                 }
+            }
+        }
+
+        // 注册链表中的所有文件描述符到 Poll
+        let mut serverfdp = sfds.as_deref_mut();
+        while let Some(server) = serverfdp {
+            poll.registry()
+                .register(
+                    &mut SourceFd(&server.fd),
+                    Token(server.fd as usize),
+                    Interest::READABLE,
+                )
+                .expect("无法注册文件描述符");
+            serverfdp = server.next.as_deref_mut();
+        }
+
+        // 等待事件并处理
+        poll.poll(&mut events, None).expect("poll 失败");
+        for event in events.iter() {
+            let mut serverfdp = sfds.as_deref_mut();
+
+            while let Some(server) = serverfdp {
+                // 检查文件描述符是否有事件（相当于 `FD_ISSET`）
+                if event.token() == Token(server.fd as usize) {
+                    // 调用 `reply_query` 处理事件
+                    last_server = reply_query(
+                        server.fd,
+                        options,
+                        &mut packet,
+                        now,
+                        &mut dnamebuff,
+                        last_server,
+                        bogus_addr.clone(),
+                    );
+                }
+
+                // 移动到下一个节点
+                serverfdp = server.next.as_deref_mut();
             }
         }
     }
