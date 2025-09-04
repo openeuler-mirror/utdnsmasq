@@ -11,6 +11,7 @@ pub mod lease;
 pub mod logs;
 pub mod network;
 pub mod option;
+pub mod rfc1035;
 pub mod util;
 use cache::*;
 use daemonize::Daemonize;
@@ -24,6 +25,7 @@ use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, SigmaskHow,
 use nix::sys::stat::{umask, Mode};
 use nix::unistd::{chdir, close, geteuid, getuid, setgid, setuid, Gid, Uid};
 use option::*;
+use rfc1035::*;
 use std::fs::File;
 use std::io::Write;
 use std::net::Ipv4Addr;
