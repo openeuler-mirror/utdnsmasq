@@ -106,16 +106,6 @@ pub fn reply_query(
     last_server
 }
 
-fn check_for_bogus_wildcard(
-    _header: &[u8],
-    _n: usize,
-    _dnamebuff: &mut Vec<u8>,
-    _bogus_nxdomain: Option<Box<BogusAddr>>,
-    _now: SystemTime,
-) -> bool {
-    false
-}
-
 fn extract_addresses(_header: &[u8], _n: usize, _dnamebuff: &mut Vec<u8>, _now: SystemTime) {}
 
 fn extract_neg_addrs(_header: &[u8], _n: usize, _dnamebuff: &mut Vec<u8>, _now: SystemTime) {}
