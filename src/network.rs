@@ -8,9 +8,17 @@ use crate::*;
 use forward_init::*;
 use get_if_addrs::{get_if_addrs, IfAddr, Interface};
 use socket2::{Domain, Protocol, Socket, Type};
+use std::collections::VecDeque;
+use std::io::{self, BufRead, BufReader};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::os::unix::io::AsRawFd; // 用于获取文件描述符
 use util::*;
+
+const SERV_FROM_RESOLV: u32 = 1; //1 表示从解析器（resolv）获取服务器，0 表示从命令行获取。
+const MAXDNAME: usize = 1025; // 最大域名长度
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+const INADDR_ANY: u32 = 0x00000000;
 
 // 添加接口函数
 pub fn add_iface(
@@ -382,4 +390,132 @@ pub fn allocate_sfd(
             None
         }
     }
+}
+
+pub fn reload_servers(
+    fname: Resolv,
+    mut serv: Option<Box<Server>>,
+    query_port: i32,
+) -> Option<Box<Server>> {
+    let mut old_servers = Vec::new();
+    let mut new_servers: Option<Box<Server>> = None;
+
+    // 将旧服务器放入可重用列表中
+    while let Some(mut server) = serv.take() {
+        serv = server.next.take(); // 获取下一个节点
+        if server.flags & SERV_FROM_RESOLV != 0 {
+            old_servers.push(server); // 将匹配的放入旧服务器队列
+        } else {
+            server.next = new_servers.take();
+            new_servers = Some(server); // 保留非匹配服务器
+        }
+    }
+
+    // 检查 Resolv 中的文件路径
+    let file_path = match &fname.file {
+        Some(path) => path,
+        None => {
+            syslog!(LOG_INFO, "No file path specified in Resolv struct",);
+            return new_servers;
+        }
+    };
+
+    // 打开文件并逐行读取
+    let file = match File::open(file_path) {
+        Ok(f) => f,
+        Err(e) => {
+            syslog!(LOG_INFO, "Failed to open file {}: {}", file_path, e);
+            return new_servers;
+        }
+    };
+
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = line.expect("failed to read line");
+        let mut tokens = line.split_whitespace();
+
+        // 检查 "nameserver" 关键字
+        if tokens.next() != Some("nameserver") {
+            continue;
+        }
+
+        // 获取 IP 地址字符串
+        let token = match tokens.next() {
+            Some(tok) => tok,
+            None => continue,
+        };
+
+        // 解析 IP 地址并生成 MySockAddr
+        let (addr, source_addr) = if let Ok(ipv4_addr) = token.parse::<Ipv4Addr>() {
+            (
+                MySockAddr {
+                    in_: SockAddrIn {
+                        sin_family: AF_INET, // AF_INET
+                        sin_port: NAMESERVER_PORT,
+                        sin_addr: InAddr {
+                            s_addr: u32::from(ipv4_addr).to_be(),
+                        },
+                        sin_zero: [0; 8],
+                    },
+                },
+                MySockAddr {
+                    in_: SockAddrIn {
+                        sin_family: AF_INET, // AF_INET
+                        sin_port: query_port as u16,
+                        sin_addr: InAddr { s_addr: 0 },
+                        sin_zero: [0; 8],
+                    },
+                },
+            )
+        } else if let Ok(ipv6_addr) = token.parse::<Ipv6Addr>() {
+            (
+                MySockAddr {
+                    in6: SockAddrIn6 {
+                        sin6_family: AF_INET6, // AF_INET6
+                        sin6_port: NAMESERVER_PORT,
+                        sin6_flowinfo: 0,
+                        sin6_addr: In6Addr {
+                            s6_addr: ipv6_addr.octets(),
+                        },
+                        sin6_scope_id: 0,
+                    },
+                },
+                MySockAddr {
+                    in6: SockAddrIn6 {
+                        sin6_family: AF_INET6, // AF_INET6
+                        sin6_port: query_port as u16,
+                        sin6_flowinfo: 0,
+                        sin6_addr: In6Addr { s6_addr: [0; 16] },
+                        sin6_scope_id: 0,
+                    },
+                },
+            )
+        } else {
+            continue;
+        };
+
+        // 重用旧服务器或创建新服务器
+        let mut server = if let Some(mut old_server) = old_servers.pop() {
+            old_server.addr = addr;
+            old_server.source_addr = source_addr;
+            old_server
+        } else {
+            Box::new(Server {
+                // 使用 Box::new 包装 Server 结构体
+                addr,
+                source_addr,
+                sfd: None,
+                domain: None,
+                flags: SERV_FROM_RESOLV,
+                next: None,
+            })
+        };
+
+        // 插入新服务器链表的头部
+        server.next = new_servers.take();
+        new_servers = Some(Box::new(*server));
+    }
+
+    new_servers
 }
