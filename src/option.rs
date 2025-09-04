@@ -10,6 +10,13 @@ pub type SaFamilyT = u16;
 pub type InPortT = u16;
 pub type InAddrT = u32;
 
+#[derive(Default, Clone)]
+pub struct Resolv {
+    pub file: Option<String>,
+    pub valid: u8,
+    pub serial: u32,
+    pub filename: &'static str,
+}
 #[derive(Clone)]
 pub struct BogusAddr {
     pub addr: InAddr,
