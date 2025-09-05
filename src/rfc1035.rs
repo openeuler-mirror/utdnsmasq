@@ -23,6 +23,7 @@ pub fn check_for_bogus_wildcard(
     name: &mut [u8],
     baddr: Option<Box<BogusAddr>>,
     now: SystemTime,
+    caches: &mut Cache,
 ) -> bool {
     // 跳过问题部分
     let mut p = match skip_questions(header, qlen) {
@@ -66,7 +67,7 @@ pub fn check_for_bogus_wildcard(
                     NetworkEndian::write_u16(&mut header_mut[6..8], 0); // ancount = 0
                     header_mut[3] = (header_mut[3] & 0b1111_0000) | 3; // rcode = NXDOMAIN
 
-                    cache_start_insert();
+                    cache_start_insert(caches);
                     cache_insert(
                         name,
                         None,
@@ -162,21 +163,108 @@ fn skip_questions(header: &[u8], plen: usize) -> Option<&[u8]> {
     Some(ansp)
 }
 
-fn extract_name(header: &[u8], qlen: usize, p: &mut &[u8], name: &mut [u8], _flag: bool) -> bool {
-    let _ = header;
-    // 提取名称的占位实现
-    if p.len() > qlen {
-        false
-    } else {
-        let len = p.len().min(name.len());
-        name[..len].copy_from_slice(&p[..len]);
-        *p = &p[len..];
-        true
-    }
-}
+// 用于从 DNS 报文的字节数组中提取域名，并将其存储到 name 数组中
+fn extract_name<'a>(
+    header: &'a [u8],
+    plen: usize,
+    pp: &mut &'a [u8],
+    name: &mut [u8],
+    is_extract: bool,
+) -> bool {
+    let mut cp = 0;
+    let mut p = *pp;
+    let mut p1 = None;
+    let mut hops = 0;
 
-fn cache_start_insert() {
-    // 开始插入缓存的占位实现
+    while let Some(&l) = p.get(0) {
+        p = &p[1..];
+        let label_type = l & 0xc0;
+
+        if label_type == 0xc0 {
+            if p.len() < 1 || p.as_ptr() as usize - header.as_ptr() as usize + 1 >= plen {
+                return false;
+            }
+            let offset = (((l & 0x3f) as usize) << 8) | p[0] as usize;
+            p = &p[1..];
+            if offset >= plen {
+                return false;
+            }
+            if p1.is_none() {
+                p1 = Some(p);
+            }
+            p = &header[offset..];
+            hops += 1;
+            if hops > 255 {
+                return false;
+            }
+        } else if label_type == 0x80 {
+            return false;
+        } else if label_type == 0x40 {
+            if (l & 0x3f) != 1 {
+                return false;
+            }
+            if !is_extract {
+                return false;
+            }
+            if p.len() < 1 {
+                return false;
+            }
+            let count = if p[0] == 0 { 256 } else { p[0] as usize };
+            p = &p[1..];
+            let digs = ((count - 1) >> 2) + 1;
+            if cp + digs + 9 >= name.len() || p.len() < ((count - 1) >> 3) + 1 {
+                return false;
+            }
+            name[cp] = b'\\';
+            name[cp + 1] = b'[';
+            name[cp + 2] = b'x';
+            cp += 3;
+            for j in 0..digs {
+                let dig = if j % 2 == 0 {
+                    p[j / 2] >> 4
+                } else {
+                    p[j / 2] & 0x0f
+                };
+                name[cp] = if dig < 10 {
+                    dig + b'0'
+                } else {
+                    dig + b'A' - 10
+                };
+                cp += 1;
+            }
+            write!(&mut name[cp..], "/{count}]").unwrap();
+            cp += 9;
+            name[cp] = b'.';
+            cp += 1;
+            p = &p[((count - 1) >> 3) + 1..];
+        } else {
+            let len = (l & 0x3f) as usize;
+            if cp + len + 1 >= name.len() || p.len() < len {
+                return false;
+            }
+            name[cp..cp + len].copy_from_slice(&p[..len]);
+            cp += len;
+            p = &p[len..];
+            name[cp] = b'.';
+            cp += 1;
+        }
+
+        if p.as_ptr() as usize - header.as_ptr() as usize >= plen {
+            return false;
+        }
+    }
+
+    if cp > 0 {
+        name[cp - 1] = 0; // 终止字符串，去掉最后一个句点
+    }
+
+    if let Some(p1) = p1 {
+        *pp = p1;
+    } else {
+        *pp = p;
+    }
+
+    true
 }
 
 fn cache_insert(_name: &[u8], _data: Option<&[u8]>, _now: SystemTime, _ttl: u32, _flags: u32) {

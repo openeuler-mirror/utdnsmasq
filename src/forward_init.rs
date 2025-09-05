@@ -46,6 +46,7 @@ pub fn reply_query(
     dnamebuff: &mut Vec<u8>,
     mut last_server: Option<Box<option::Server>>,
     bogus_nxdomain: Option<Box<option::BogusAddr>>,
+    caches: &mut Cache,
 ) -> Option<Box<Server>> {
     let forward_records: &mut HashMap<u16, FRec> = todo!();
     // 使用原始文件描述符创建 UdpSocket
@@ -80,7 +81,14 @@ pub fn reply_query(
                 if opcode == 0 {
                     if !(bogus_nxdomain.is_some()
                         && rcode == 0
-                        && check_for_bogus_wildcard(header, n, dnamebuff, bogus_nxdomain, now))
+                        && check_for_bogus_wildcard(
+                            header,
+                            n,
+                            dnamebuff,
+                            bogus_nxdomain,
+                            now,
+                            caches,
+                        ))
                     {
                         let ancount = NetworkEndian::read_u16(&header[6..8]);
                         if rcode == 0 && ancount != 0 {

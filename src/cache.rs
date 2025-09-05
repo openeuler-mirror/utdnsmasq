@@ -30,10 +30,7 @@ const OPT_EXPAND: u32 = 1;
 const F_NEG: u32 = 32;
 const INADDRSZ: usize = 4;
 const IN6ADDRSZ: usize = 16;
-
-// 全局的 DHCP 缓存状态
-static mut DHCP_INUSE: Option<*mut Crec> = None; // 当前使用的 DHCP 条目
-static mut DHCP_SPARE: Option<*mut Crec> = None; // 可重用的 DHCP 条目
+static mut INSERT_ERROR: bool = false;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AllAddr {
@@ -719,8 +716,8 @@ pub fn cache_add_dhcp_entry(
         }
 
         // 创建新条目
-        let crec: *mut Crec = if let Some(spare) = DHCP_SPARE {
-            DHCP_SPARE = None; // 清空备用条目
+        let crec: *mut Crec = if let Some(spare) = caches.dhcp_spare {
+            caches.dhcp_spare = None; // 清空备用条目
             spare // 使用备用条目
         } else {
             // 分配新条目
@@ -748,9 +745,8 @@ pub fn cache_add_dhcp_entry(
             current_crec.addr = host_address; // 直接使用地址
             current_crec.name = Name::Namep(Box::new(host_name.to_string())); // 转换为 String
 
-            // 将条目链接到 DHCP_INUSE 链表
-            current_crec.prev = DHCP_INUSE; // 连接到当前 DHCP 使用的条目
-            DHCP_INUSE = Some(crec); // 更新当前使用的 DHCP 条目
+            current_crec.prev = caches.dhcp_inuse; // 连接到当前 DHCP 使用的条目
+            caches.dhcp_inuse = Some(crec); // 更新当前使用的 DHCP 条目
         }
     }
 }
@@ -934,5 +930,19 @@ pub fn dump_cache(debug: i32, cache: &Cache) {
                 }
             }
         }
+    }
+}
+
+// 清理缓存中的未提交节点
+pub fn cache_start_insert(caches: &mut Cache) {
+    unsafe {
+        // 清理未提交的节点
+        while let Some(node) = caches.new_chain.take() {
+            let next_node = (*node).next.take();
+            cache_free(caches, node); // 在这里调用 `cache_free` 以处理每个节点
+            caches.new_chain = next_node;
+        }
+        caches.new_chain = None;
+        INSERT_ERROR = false;
     }
 }

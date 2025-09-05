@@ -8,17 +8,14 @@ use crate::*;
 use forward_init::*;
 use get_if_addrs::{get_if_addrs, IfAddr, Interface};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader};
+use std::io::{BufRead, BufReader};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::os::unix::io::AsRawFd; // 用于获取文件描述符
 use util::*;
 
 const SERV_FROM_RESOLV: u32 = 1; //1 表示从解析器（resolv）获取服务器，0 表示从命令行获取。
-const MAXDNAME: usize = 1025; // 最大域名长度
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
-const INADDR_ANY: u32 = 0x00000000;
 
 // 添加接口函数
 pub fn add_iface(
@@ -168,7 +165,7 @@ pub fn enumerate_interfaces(
             IfAddr::V4(ifaddr) => {
                 let my_sock_addr = MySockAddr {
                     in_: SockAddrIn {
-                        sin_family: 2,                       // AF_INET
+                        sin_family: AF_INET,                 // AF_INET
                         sin_addr: create_in_addr(ifaddr.ip), // 模拟的地址数据
                         sin_port: port.to_be(),
                         sin_zero: [0; 8],
@@ -213,7 +210,7 @@ pub fn enumerate_interfaces(
                 let scope_id = get_scope_id(ifaddr.ip, port);
                 let my_sock_addr = MySockAddr {
                     in6: SockAddrIn6 {
-                        sin6_family: 10,                       // AF_INET6
+                        sin6_family: AF_INET6,                 // AF_INET6
                         sin6_port: port.to_be(),               // 网络字节序端口
                         sin6_flowinfo: 0,                      // 模拟的流信息
                         sin6_addr: create_in6_addr(ifaddr.ip), // 使用正确的 `In6Addr`
@@ -262,12 +259,12 @@ pub fn check_servers(
 
     while let Some(ref mut server) = new {
         let addr_str = match unsafe { server.addr.sa.sa_family } {
-            2 => {
+            AF_INET => {
                 // IPv4
                 let addr = unsafe { server.addr.in_ };
                 format!("{}:{}", addr.sin_addr.s_addr, addr.sin_port)
             }
-            10 => {
+            AF_INET6 => {
                 // IPv6
                 let addr = unsafe { server.addr.in6 };
                 format!(
@@ -285,8 +282,8 @@ pub fn check_servers(
         };
 
         let port = match unsafe { server.addr.sa.sa_family } {
-            2 => unsafe { server.addr.in_.sin_port },
-            10 => unsafe { server.addr.in6.sin6_port },
+            AF_INET => unsafe { server.addr.in_.sin_port },
+            AF_INET6 => unsafe { server.addr.in6.sin6_port },
             _ => continue,
         };
 
@@ -361,14 +358,14 @@ pub fn allocate_sfd(
     // 创建 UDP 套接字
     let socket_addr: SocketAddr = unsafe {
         match source_addr.sa.sa_family {
-            2 => {
+            AF_INET => {
                 let addr = source_addr.in_;
                 SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::from(addr.sin_addr.s_addr)),
                     addr.sin_port,
                 )
             }
-            10 => {
+            AF_INET6 => {
                 let addr = source_addr.in6;
                 SocketAddr::new(
                     IpAddr::V6(Ipv6Addr::from(addr.sin6_addr.s6_addr)),
@@ -392,8 +389,9 @@ pub fn allocate_sfd(
     }
 }
 
+// 从配置文件中重新加载 DNS 服务器列表，并更新现有的服务器链表
 pub fn reload_servers(
-    fname: Resolv,
+    fname: Option<Box<ResolvC>>,
     mut serv: Option<Box<Server>>,
     query_port: i32,
 ) -> Option<Box<Server>> {
@@ -411,17 +409,17 @@ pub fn reload_servers(
         }
     }
 
-    // 检查 Resolv 中的文件路径
-    let file_path = match &fname.file {
+    // 如果没有提供 fname 或其中没有文件名，则返回现有的服务器列表
+    let file_path = match fname.and_then(|resolv| resolv.name) {
         Some(path) => path,
         None => {
-            syslog!(LOG_INFO, "No file path specified in Resolv struct",);
+            syslog!(LOG_INFO, "No file path specified in ResolvC struct",);
             return new_servers;
         }
     };
 
     // 打开文件并逐行读取
-    let file = match File::open(file_path) {
+    let file = match File::open(&file_path) {
         Ok(f) => f,
         Err(e) => {
             syslog!(LOG_INFO, "Failed to open file {}: {}", file_path, e);
@@ -451,9 +449,9 @@ pub fn reload_servers(
             (
                 MySockAddr {
                     in_: SockAddrIn {
-                        sin_family: AF_INET, // AF_INET
+                        sin_family: AF_INET,
                         sin_port: NAMESERVER_PORT,
-                        sin_addr: InAddr {
+                        sin_addr: option::InAddr {
                             s_addr: u32::from(ipv4_addr).to_be(),
                         },
                         sin_zero: [0; 8],
@@ -461,9 +459,9 @@ pub fn reload_servers(
                 },
                 MySockAddr {
                     in_: SockAddrIn {
-                        sin_family: AF_INET, // AF_INET
+                        sin_family: AF_INET,
                         sin_port: query_port as u16,
-                        sin_addr: InAddr { s_addr: 0 },
+                        sin_addr: option::InAddr { s_addr: 0 },
                         sin_zero: [0; 8],
                     },
                 },
@@ -472,10 +470,10 @@ pub fn reload_servers(
             (
                 MySockAddr {
                     in6: SockAddrIn6 {
-                        sin6_family: AF_INET6, // AF_INET6
+                        sin6_family: AF_INET6,
                         sin6_port: NAMESERVER_PORT,
                         sin6_flowinfo: 0,
-                        sin6_addr: In6Addr {
+                        sin6_addr: option::In6Addr {
                             s6_addr: ipv6_addr.octets(),
                         },
                         sin6_scope_id: 0,
@@ -483,10 +481,10 @@ pub fn reload_servers(
                 },
                 MySockAddr {
                     in6: SockAddrIn6 {
-                        sin6_family: AF_INET6, // AF_INET6
+                        sin6_family: AF_INET6,
                         sin6_port: query_port as u16,
                         sin6_flowinfo: 0,
-                        sin6_addr: In6Addr { s6_addr: [0; 16] },
+                        sin6_addr: option::In6Addr { s6_addr: [0; 16] },
                         sin6_scope_id: 0,
                     },
                 },
@@ -502,7 +500,6 @@ pub fn reload_servers(
             old_server
         } else {
             Box::new(Server {
-                // 使用 Box::new 包装 Server 结构体
                 addr,
                 source_addr,
                 sfd: None,

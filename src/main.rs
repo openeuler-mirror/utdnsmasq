@@ -401,7 +401,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         complain("failed to drop root privs for user", "");
     }
 
-    let servers = check_servers(serv_addrs, &interfaces, &mut sfds);
+    let mut servers = check_servers(serv_addrs, &interfaces, &mut sfds);
     let mut last_server = servers.clone();
 
     while !SIGTERM_FLAG.load(Ordering::Relaxed) {
@@ -422,17 +422,12 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             let _ = lease_update_dns(&mut caches, 1);
         }
         if resolv.is_some() && (options & OPT_NO_POLL) != 0 {
-            // servers = check_servers(
-            //     reload_servers(
-            //         resolv.as_ref().unwrap().name.as_str(),
-            //         &dnamebuff,
-            //         servers.clone(),
-            //         query_port,
-            //     ),
-            //     &interfaces,
-            //     &mut sfds,
-            // );
-            // let mut laster_server = servers.clone();
+            servers = check_servers(
+                reload_servers(resolv.clone(), servers.clone(), query_port),
+                &interfaces,
+                &mut sfds,
+            );
+            let mut laster_server = servers.clone();
             SIGHUP_FLAG.store(false, Ordering::SeqCst);
         }
 
@@ -590,7 +585,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
             last = Some(now);
             if options & OPT_NO_POLL == 0 {
                 // 用于记录最近修改的文件信息
-                let mut latest: Option<ResolvC> = None;
+                let mut latest: Option<Box<ResolvC>> = None;
                 let mut last_change = UNIX_EPOCH;
 
                 let mut f_resolv = resolv.as_deref_mut();
@@ -605,7 +600,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                                 resolv.logged = false;
                                 if modified_time > last_change {
                                     last_change = modified_time;
-                                    latest = Some(resolv.clone());
+                                    latest = Some(Box::new(resolv.clone()));
                                 }
                             }
                             Err(e) => {
@@ -638,12 +633,13 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                     if last_change > resolv_changed.expect("REASON") {
                         resolv_changed = Some(last_change);
 
-                        if let Some(name) = &latest.name {
-                            // servers = check_servers(
-                            //     reload_servers(name, &mut dnamebuff, servers, query_port),
-                            //     &interfaces,
-                            //     &mut sfds,
-                            // );
+                        if let Some(_name) = &latest.name {
+                            servers = check_servers(
+                                reload_servers(Some(latest), servers, query_port),
+                                &interfaces,
+                                &mut sfds,
+                            );
+                            let last_server = servers.clone();
                         }
                     }
                 }
@@ -680,6 +676,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                         &mut dnamebuff,
                         last_server,
                         bogus_addr.clone(),
+                        &mut caches,
                     );
                 }
 
