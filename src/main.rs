@@ -417,7 +417,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                 options,
                 &mut dnamebuff,
                 domain_suffix.clone(),
-                addn_hosts.as_ref().map(|x| x.as_str()),
+                addn_hosts.as_ref().map(|x| x.to_string()),
             );
             let _ = lease_update_dns(&mut caches, 1);
         }

@@ -69,6 +69,7 @@ pub fn check_for_bogus_wildcard(
 
                     cache_start_insert(caches);
                     cache_insert(
+                        caches,
                         name,
                         None,
                         now,
@@ -265,10 +266,6 @@ fn extract_name<'a>(
     }
 
     true
-}
-
-fn cache_insert(_name: &[u8], _data: Option<&[u8]>, _now: SystemTime, _ttl: u32, _flags: u32) {
-    // 插入缓存的占位实现
 }
 
 fn cache_end_insert() {
