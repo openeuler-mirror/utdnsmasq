@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::{self, BufRead};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ptr::null_mut;
+use std::str;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -30,7 +31,13 @@ const OPT_EXPAND: u32 = 1;
 const F_NEG: u32 = 32;
 const INADDRSZ: usize = 4;
 const IN6ADDRSZ: usize = 16;
+const F_CONFIG: u32 = 0x10;
+const F_UPSTREAM: u32 = 0x40;
+const F_NXDOMAIN: u32 = 0x08;
+const F_SERVER: u32 = 0x80;
+const F_QUERY: u32 = 0x100;
 static mut INSERT_ERROR: bool = false;
+static mut ADDN_FILE: Option<String> = None;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AllAddr {
@@ -172,7 +179,7 @@ pub fn cache_reload(
     opts: u32,
     mut buff: &mut Vec<u8>,
     mut domain_suffix: Option<String>,
-    addn_hosts: Option<&str>,
+    addn_hosts: Option<String>,
 ) {
     // 清除缓存逻辑
     for i in 0..caches.hash_size {
@@ -237,6 +244,7 @@ pub fn cache_reload(
         ) {
             complain("Error reading additional hosts file: {}", &err.to_string());
         }
+        unsafe { ADDN_FILE = Some(addn_hosts) };
     }
 }
 
@@ -944,5 +952,233 @@ pub fn cache_start_insert(caches: &mut Cache) {
         }
         caches.new_chain = None;
         INSERT_ERROR = false;
+    }
+}
+
+// 将一条缓存记录插入到缓存中
+pub fn cache_insert(
+    caches: &mut Cache,
+    name: &[u8],
+    data: Option<&[u8]>,
+    now: SystemTime,
+    ttl: u32,
+    flags: u32,
+) {
+    let mut flags = flags;
+    let mut freed_all = flags & F_REVERSE != 0;
+
+    log_query(caches, flags | F_UPSTREAM, name, data);
+
+    // CONFIG 位仅用于日志记录，无需在插入时使用
+    flags &= !F_CONFIG;
+
+    // 如果上次插入失败，则直接返回
+    unsafe {
+        if INSERT_ERROR {
+            return;
+        }
+    }
+
+    // 将 `name` 从字节数组转换为字符串
+    let name_str = match str::from_utf8(name) {
+        Ok(valid_str) => Some(valid_str),
+        Err(_) => None, // 如果转换失败，忽略此字符串
+    };
+
+    // 将 `data` 转换为 `AllAddr` 类型（假设我们只有 IPv4 地址）
+    let addr_converted = if let Some(data) = data {
+        if data.len() == INADDRSZ {
+            let ipv4 = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
+            Some(AllAddr::Addr4(ipv4))
+        } else if data.len() == IN6ADDRSZ {
+            let segments: [u8; 16] = data.try_into().unwrap();
+            let ipv6 = Ipv6Addr::from(segments);
+            Some(AllAddr::Addr6(ipv6))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 删除过期条目以及当前插入的名称/地址的条目
+    cache_scan_free(caches, name_str, addr_converted.as_ref(), now, flags);
+
+    // 从 LRU 列表的末尾获取缓存条目
+    loop {
+        if caches.cache_tail.is_none() {
+            // 没有剩余条目，缓存太小，放弃
+            unsafe {
+                INSERT_ERROR = true;
+            }
+            return;
+        }
+
+        let new = unsafe { &mut *caches.cache_tail.unwrap() };
+
+        // 如果 LRU 列表末尾仍在使用中：如果没有扫描所有哈希链以查找过期条目，现在执行此操作。
+        // 如果已经尝试过，那么现在开始清除条目。
+        if new.flags & (F_FORWARD | F_REVERSE) != 0 {
+            if freed_all {
+                let addr_option = match &new.addr {
+                    AllAddr::Addr4(ipv4) => Some(AllAddr::Addr4(*ipv4)),
+                    AllAddr::Addr6(ipv6) => Some(AllAddr::Addr6(*ipv6)),
+                };
+                cache_scan_free(caches, name_str, addr_option.as_ref(), now, new.flags);
+            } else {
+                cache_scan_free(caches, None, None, now, 0);
+                freed_all = true;
+            }
+            continue;
+        }
+
+        // 检查是否需要为长名称分配额外内存，如果失败，则直接返回。
+        let mut big_name = None;
+        if name.len() > SMALLDNAME - 1 {
+            if let Some(free) = caches.big_free.take() {
+                big_name = Some(free);
+            } else if caches.bignames_left == 0 {
+                unsafe {
+                    INSERT_ERROR = true;
+                }
+                return;
+            } else {
+                big_name = Some(Box::new(BigName {
+                    name: ['\0'; MAXDNAME],
+                    next: None,
+                }));
+                caches.bignames_left -= 1;
+            }
+        }
+
+        Cache::cache_unlink(caches, new);
+        break;
+    }
+
+    let new_entry = Box::new(Crec {
+        next: None,
+        prev: None,
+        hash_next: None,
+        ttd: now + Duration::new(ttl as u64, 0),
+        addr: addr_converted.expect("REASON"),
+        flags,
+        name: if name.len() > SMALLDNAME - 1 {
+            // 如果名称长度超过 SMALLDNAME，则使用 Bigname
+            let mut big_name = BigName {
+                name: ['\0'; MAXDNAME],
+                next: None,
+            };
+            for (i, &byte) in name.iter().enumerate().take(MAXDNAME) {
+                big_name.name[i] = byte as char;
+            }
+            Name::Bname(Box::new(big_name))
+        } else {
+            // 使用 Sname，适用于短名称
+            let mut sname = ['\0'; SMALLDNAME];
+            for (i, &byte) in name.iter().enumerate().take(SMALLDNAME) {
+                sname[i] = byte as char;
+            }
+            Name::Sname(sname)
+        },
+    });
+
+    let new_entry_ptr = Box::into_raw(new_entry);
+    unsafe {
+        if let Some(chain) = caches.new_chain {
+            (*new_entry_ptr).next = Some(chain);
+        }
+        caches.new_chain = Some(new_entry_ptr);
+    }
+}
+
+pub fn log_query(caches: &mut Cache, flags: u32, name: &[u8], addr: Option<&[u8]>) {
+    let mut source = "cached";
+    let mut verb = "is";
+    let mut addrbuff = String::new();
+
+    // 如果日志查询标志没有开启，则直接返回
+    if caches.log_queries == 0 {
+        return;
+    }
+
+    // 处理 `name`，将其转换为字符串
+    let name_str = match str::from_utf8(name) {
+        Ok(valid_str) => valid_str,
+        Err(_) => "<invalid name>",
+    };
+
+    // 处理地址部分
+    if let Some(addr_bytes) = addr {
+        if addr_bytes.len() == 4 {
+            // IPv4 地址
+            let ipv4 = Ipv4Addr::new(addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
+            addrbuff = ipv4.to_string();
+        } else if addr_bytes.len() == 16 {
+            // IPv6 地址
+            let segments: [u8; 16] = match addr_bytes.try_into() {
+                Ok(segments) => segments,
+                Err(_) => {
+                    addrbuff = "<invalid address>".to_string();
+                    syslog!(LOG_DEBUG, "{} {} {} {}", source, name_str, verb, addrbuff);
+                    return;
+                }
+            };
+            let ipv6 = Ipv6Addr::from(segments);
+            addrbuff = ipv6.to_string();
+        } else {
+            addrbuff = "<invalid address>".to_string();
+        }
+    } else {
+        addrbuff = "<no address>".to_string();
+    }
+
+    // 根据标志位设置 source 和 verb
+    if flags & F_NEG != 0 {
+        if flags & F_REVERSE != 0 {
+            addrbuff = format!(
+                "<{}>-{}",
+                if flags & F_NXDOMAIN != 0 {
+                    "NXDOMAIN"
+                } else {
+                    "NODATA"
+                },
+                addrbuff
+            );
+        }
+
+        if flags & F_IPV4 != 0 {
+            addrbuff.push_str("IPv4");
+        } else {
+            addrbuff.push_str("IPv6");
+        }
+    }
+
+    if flags & F_DHCP != 0 {
+        source = "DHCP";
+    } else if flags & F_HOSTS != 0 {
+        unsafe {
+            if flags & F_ADDN != 0 {
+                source = ADDN_FILE.as_deref().unwrap_or("default_file");
+            } else {
+                source = HOSTSFILE;
+            }
+        }
+    } else if flags & F_CONFIG != 0 {
+        source = "config";
+    } else if flags & F_UPSTREAM != 0 {
+        source = "reply";
+    } else if flags & F_SERVER != 0 {
+        source = "forwarded";
+        verb = "to";
+    } else if flags & F_QUERY != 0 {
+        source = "query";
+        verb = "from";
+    }
+
+    // 根据标志位输出日志信息
+    if (flags & F_FORWARD != 0) || (flags & F_NEG != 0) {
+        syslog!(LOG_DEBUG, "{} {} {} {}", source, name_str, verb, addrbuff);
+    } else if flags & F_REVERSE != 0 {
+        syslog!(LOG_DEBUG, "{} {} is {}", source, addrbuff, name_str);
     }
 }
