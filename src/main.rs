@@ -58,13 +58,13 @@ const PACKETSZ: usize = 512; // 典型的 DNS 数据包大小
 const RRFIXEDSZ: usize = 10; // 资源记录的固定大小
 const CACHESIZ: usize = 1024; // 缓存大小默认值
 const NAMESERVER_PORT: u16 = 53; // Default DNS server port
-const RUNFILE: Option<&str> = Some("/var/run/utdnsmasq.pid");
+const RUNFILE: &str = "/var/run/utdnsmasq.pid";
 const CHUSER: &str = "nobody"; // 默认用户名
 const CHGRP: &str = "dip"; // 默认组名
 const IFPACKET: &str = "/usr/include/netpacket/packet.h";
 const IFBPF: &str = "/usr/include/linux/bpf.h";
 const OPT_DEBUG: u32 = 64;
-const LEASEFILE: Option<&str> = Some("/var/lib/misc/dnsmasq.leases");
+const LEASEFILE: &str = "/var/lib/misc/dnsmasq.leases";
 const VERSION: &str = "2.0";
 const OPT_NO_POLL: u32 = 32;
 const OPT_LOG: u32 = 4;
@@ -90,7 +90,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut query_port: i32 = 0; // 查询端口，初始值为0
     let mut first_loop: bool = true;
     let mut local_ttl: u64 = 0; // 本地缓存 TTL，初始值为 0
-    let runfile: Option<&str> = RUNFILE; // 进程 PID 文件路径，默认为 RUNFILE
+    let mut runfile: Option<String> = Some(String::from(RUNFILE)); // 进程 PID 文件路径，默认为 RUNFILE
 
     let mut interfaces: Option<Box<Irec>> = None;
     // 时间戳相关变量
@@ -102,17 +102,17 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut dhcp: Option<Box<DhcpContext>> = None;
     let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
     let dhcp_opts: Option<Box<DhcpOpt>> = None;
-    let mxname: Option<&mut String> = None;
-    let mxtarget: Option<&mut String> = None;
-    let mut lease_file: Option<&str> = None; // 租约文件路径
-    let addn_hosts: Option<&mut String> = None; // 额外主机文件路径
-    let domain_suffix: Option<String> = None; // 域名后缀
-    let mut username: &str = CHUSER; // 用户名，默认值为 CHUSER
-    let mut groupname: &str = CHGRP; // 组名，默认值为 CHGRP
-    let if_names: Option<Box<Iname>> = None; // 用于存储接口名称
-    let if_addrs: Option<Box<Iname>> = None; // 用于存储接口地址
-    let if_except: Option<Box<Iname>> = None; // 用于存储例外情况
-    let bogus_addr: Option<Box<BogusAddr>> = None;
+    let mut mxname: Option<String> = None;
+    let mut mxtarget: Option<String> = None;
+    let mut lease_file: Option<String> = None; // 租约文件路径
+    let mut addn_hosts: Option<String> = None; // 额外主机文件路径
+    let mut domain_suffix: Option<String> = None; // 域名后缀
+    let mut username: String = CHUSER.to_string(); // 用户名，默认值为 CHUSER
+    let mut groupname: String = CHGRP.to_string(); // 组名，默认值为 CHGRP
+    let mut if_names: Option<Box<Iname>> = None; // 用于存储接口名称
+    let mut if_addrs: Option<Box<Iname>> = None; // 用于存储接口地址
+    let mut if_except: Option<Box<Iname>> = None; // 用于存储例外情况
+    let mut bogus_addr: Option<Box<BogusAddr>> = None;
     let dhcp_sname: Option<&mut String> = None;
     let dhcp_file: Option<&mut String> = Default::default();
     let serv_addrs: Option<Box<Server>> = None;
@@ -152,24 +152,24 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         argc,
         args,
         &mut dnamebuff,
-        &resolv,
-        &mxname,
-        &mxtarget,
+        &mut resolv,
+        &mut mxname,
+        &mut mxtarget,
         &mut lease_file,
         &mut username,
         &mut groupname,
-        &domain_suffix,
-        runfile,
-        &if_names,
-        &if_addrs,
-        &if_except,
-        &bogus_addr,
+        &mut domain_suffix,
+        &mut runfile,
+        &mut if_names,
+        &mut if_addrs,
+        &mut if_except,
+        &mut bogus_addr,
         &serv_addrs,
-        Some(&mut cachesize),
+        &mut cachesize,
         Some(&mut port),
         Some(&mut query_port),
         Some(&mut local_ttl),
-        &addn_hosts,
+        &mut addn_hosts,
         &dhcp,
         &mut dhcp_conf,
         dhcp_opts,
@@ -177,8 +177,9 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         dhcp_sname,
         dhcp_next_server,
     );
+
     if lease_file.is_none() {
-        lease_file = LEASEFILE;
+        lease_file = Some(String::from(LEASEFILE));
     } else if dhcp.is_none() {
         complain("********* dhcp-lease option set, but not dhcp-range.", "");
         complain(
@@ -245,7 +246,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                     // 如果 iface 为空字符串，执行后续代码块
                     // die("********* No suitable interface for DHCP service at address", inet_ntoa(dhcp_tmp->start));
                     let mut leasefd = lease_init(
-                        lease_file,
+                        lease_file.as_ref().map(|s| s.as_str()),
                         domain_suffix.clone(),
                         dnamebuff,
                         packet,
@@ -321,20 +322,21 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                 }
             }
         }
-
-        if Some(username).is_some() {
+        let username_str: &str = username.as_str(); // 获取用户名字符串  将string类型转换为&str类型
+        let groupname_str: &str = groupname.as_str();
+        if Some(username_str).is_some() {
             // 获取用户信息
-            if let Some(user) = get_user_by_name(username) {
+            if let Some(user) = get_user_by_name(username_str) {
                 // 设置组ID
-                if Some(groupname).is_some() {
-                    if let Some(group) = get_group_by_name(groupname) {
+                if Some(groupname_str).is_some() {
+                    if let Some(group) = get_group_by_name(groupname_str) {
                         let gid = Gid::from_raw(group.gid());
                         // 设置组ID
                         if let Err(_e) = setgid(gid) {
                             die("Failed to set group ID: {}", &gid.to_string());
                         }
                     } else {
-                        die("Group not found: {}", groupname);
+                        die("Group not found: {}", groupname_str);
                     }
                 } else {
                     // 如果没有提供组名，则使用用户的主组
@@ -349,7 +351,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                     die("Failed to set user ID: {}", &user.uid().to_string());
                 }
             } else {
-                die("User not found: {}", username);
+                die("User not found: {}", username_str);
             }
         } else {
             die("Username cannot be None", "");
@@ -692,7 +694,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
 fn daemonize() {
     // 创建守护进程
     let daemonize = Daemonize::new()
-        .pid_file(RUNFILE.expect("REASON").to_string()) // 设置 PID 文件的路径
+        .pid_file(RUNFILE.to_string()) // 设置 PID 文件的路径
         .chown_pid_file(true) // 设置是否将 PID 文件的所有权更改为当前用户
         .umask(0o027) // 设置 umask
         .working_directory("/") // 设置工作目录
