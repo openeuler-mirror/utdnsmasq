@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use crate::util::hostname_isequal;
+use crate::util::hostname_isequal;
 use crate::*;
 use byteorder::{ByteOrder, NetworkEndian};
 use std::time::SystemTime;
@@ -680,5 +680,3 @@ pub fn extract_neg_addrs(
 
     cache_end_insert(caches);
 }
-
- 
