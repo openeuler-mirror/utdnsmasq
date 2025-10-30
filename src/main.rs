@@ -15,6 +15,7 @@ pub mod rfc1035;
 pub mod util;
 use cache::*;
 use daemonize::Daemonize;
+use dhcp::*;
 use forward::*;
 use lease::*;
 use logs::*;
@@ -101,7 +102,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut resolv: Option<Box<ResolvC>> = None;
     let mut dhcp: Option<Box<DhcpContext>> = None;
     let mut dhcp_conf: Option<Box<DhcpConfig>> = None;
-    let dhcp_opts: Option<Box<DhcpOpt>> = None;
+    let mut dhcp_opts: Option<Box<DhcpOpt>> = None;
     let mut mxname: Option<String> = None;
     let mut mxtarget: Option<String> = None;
     let mut lease_file: Option<String> = None; // 租约文件路径
@@ -113,8 +114,8 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut if_addrs: Option<Box<Iname>> = None; // 用于存储接口地址
     let mut if_except: Option<Box<Iname>> = None; // 用于存储例外情况
     let mut bogus_addr: Option<Box<BogusAddr>> = None;
-    let dhcp_sname: Option<&mut String> = None;
-    let dhcp_file: Option<&mut String> = Default::default();
+    let mut dhcp_sname: Option<&mut String> = None;
+    let mut dhcp_file: Option<&mut String> = Default::default();
     let serv_addrs: Option<Box<Server>> = None;
     let mut dnamebuff = vec![0u8; MAXDNAME];
     let mut packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
@@ -166,15 +167,15 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         &mut bogus_addr,
         &serv_addrs,
         &mut cachesize,
-        &mut port,
-        &mut query_port,
-        &mut local_ttl,
+        Some(&mut port),
+        Some(&mut query_port),
+        Some(&mut local_ttl),
         &mut addn_hosts,
-        &mut dhcp,
+        &dhcp,
         &mut dhcp_conf,
-        dhcp_opts,
-        dhcp_file,
-        dhcp_sname,
+        &mut dhcp_opts,
+        &mut dhcp_file,
+        &mut dhcp_sname,
         dhcp_next_server,
     );
 
@@ -684,6 +685,41 @@ fn start(argc: usize, args: Vec<String>) -> usize {
 
                 // 移动到下一个节点
                 serverfdp = server.next.as_deref_mut();
+            }
+        }
+
+        let mut dhcp_tmp = dhcp.as_deref_mut();
+        while let Some(dtp) = dhcp_tmp {
+            poll.registry()
+                .register(
+                    &mut SourceFd(&dtp.fd),
+                    Token(dtp.fd as usize),
+                    Interest::READABLE,
+                )
+                .expect("无法注册文件描述符");
+            dhcp_tmp = dtp.next.as_deref_mut();
+        }
+
+        poll.poll(&mut events, None).expect("poll 失败");
+        for event in events.iter() {
+            let mut dhcp_tmp = dhcp.as_deref_mut();
+            while let Some(dtp) = dhcp_tmp {
+                if event.token() == Token(dtp.fd as usize) {
+                    dhcp_packet(
+                        &mut caches,
+                        Some(dtp),
+                        &mut packet,
+                        dhcp_opts.clone(),
+                        dhcp_conf.clone(),
+                        now,
+                        &mut dnamebuff,
+                        domain_suffix.clone(),
+                        &mut dhcp_file,
+                        &mut dhcp_sname,
+                        dhcp_next_server,
+                    );
+                }
+                dhcp_tmp = dtp.next.as_deref_mut();
             }
         }
     }

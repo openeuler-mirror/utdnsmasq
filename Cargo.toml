@@ -21,3 +21,4 @@ colored = "2.1.0"
 mio = { version = "0.8", features = ["os-ext", "os-poll"] }
 byteorder = "1.4"
 regex = "1.5.4"
+pnet = "0.35"
