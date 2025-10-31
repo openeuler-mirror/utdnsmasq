@@ -680,3 +680,223 @@ pub fn extract_neg_addrs(
 
     cache_end_insert(caches);
 }
+
+/*
+处理 DHCP 请求并生成相应的响应包。主要功能如下：
+检查请求包的有效性：确保请求包符合 DHCP 协议的基本要求。
+查找客户端标识符：从请求包中提取客户端标识符，如果没有则使用硬件地址。
+查找现有租约：根据客户端标识符查找已存在的 DHCP 租约。
+处理请求选项：解析请求包中的选项，如请求的 IP 地址、主机名等。
+根据请求类型生成响应：
+DHCPDISCOVER：生成 DHCPOFFER 响应，分配 IP 地址。
+DHCPREQUEST：生成 DHCPACK 响应，确认 IP 地址分配或拒绝请求（DHCPNAK）。
+设置响应包的选项：包括服务器标识符、租约时间等。
+返回响应包的大小：成功时返回响应包的大小，失败时返回 0 或负值表示强制广播。
+*/
+pub fn dhcp_reply(
+    context: &DhcpContext,
+    packet: &mut DhcpPacket,
+    sz: usize,
+    now: SystemTime,
+    namebuff: &mut [u8],
+    dhcp_opts: &DhcpOpt,
+    dhcp_configs: &DhcpConfig,
+    domain_suffix: String,
+    dhcp_file: &mut String,
+    dhcp_sname: &mut String,
+    dhcp_next_server: Ipv4Addr,
+) -> i32 {
+    const BOOTREQUEST: u8 = 1;
+    const BOOTREPLY: u8 = 2;
+    const DHCP_COOKIE: u32 = 0x63825363;
+    const OPTION_END: u8 = 255;
+    const OPTION_MESSAGE_TYPE: u8 = 53;
+    const DHCPDISCOVER: u8 = 1;
+    const DHCPOFFER: u8 = 2;
+    const DHCPREQUEST: u8 = 3;
+    const DHCPACK: u8 = 5;
+
+    // 检查是否为合法的 DHCP 请求包
+    if packet.op != BOOTREQUEST
+        || packet.htype != 1
+        || packet.hlen != 6
+        || packet.cookie != DHCP_COOKIE
+    {
+        return 0;
+    }
+
+    packet.op = BOOTREPLY;
+
+    // 查找客户端标识符
+    let client_id = if let Some(client_id_option) = option_find(packet, sz, 61) {
+        client_id_option.to_vec()
+    } else {
+        packet.chaddr[..6].to_vec()
+    };
+
+    // 查找已存在的租约
+    let lease = lease_find_by_client(&client_id);
+
+    // 查找请求的选项
+    let req_options = if let Some(requested_options) = option_find(packet, sz, 55) {
+        let len = requested_options.len();
+        namebuff[..len].copy_from_slice(requested_options);
+        namebuff[len] = OPTION_END;
+        &namebuff[..=len]
+    } else {
+        &[]
+    };
+
+    // 查找主机名
+    let hostname = if let Some(config_hostname) = &dhcp_configs.hostname {
+        Some(config_hostname.clone())
+    } else if let Some(hostname_option) = option_find(packet, sz, 12) {
+        let len = hostname_option.len();
+        let mut hostname_buf = String::from_utf8_lossy(&hostname_option[..len]).to_string();
+        hostname_buf.truncate(len);
+        if canonicalise(&hostname_buf) {
+            Some(hostname_buf)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 根据请求类型处理
+    if let Some(message_type) = option_find(packet, sz, OPTION_MESSAGE_TYPE) {
+        match message_type[0] {
+            DHCPDISCOVER => {
+                if let Some(requested_ip) = option_find(packet, sz, 50) {
+                    packet.yiaddr = Ipv4Addr::from(requested_ip.try_into().unwrap_or([0, 0, 0, 0]));
+                }
+
+                if let Some(existing_lease) = lease {
+                    packet.yiaddr = match existing_lease.addr {
+                        AllAddr::Addr4(addr) => addr,
+                        _ => Ipv4Addr::UNSPECIFIED,
+                    };
+                } else if dhcp_configs.addr != Ipv4Addr::UNSPECIFIED {
+                    packet.yiaddr = dhcp_configs.addr;
+                } else if !address_available(context, packet.yiaddr)
+                    && !address_allocate(context, &dhcp_configs, &mut packet.yiaddr)
+                {
+                    eprintln!("Address pool exhausted");
+                    return 0;
+                }
+
+                packet.siaddr = dhcp_next_server;
+                bootp_option_put(packet, dhcp_file, dhcp_sname);
+                option_put(packet, OPTION_MESSAGE_TYPE, &[DHCPOFFER]);
+                option_put(packet, 54, &context.serv_addr.octets());
+                option_put(packet, 51, &dhcp_configs.lease_time.to_be_bytes());
+                do_req_options(
+                    context,
+                    packet,
+                    req_options,
+                    dhcp_opts,
+                    &domain_suffix,
+                    hostname.as_deref(),
+                );
+                option_put(packet, OPTION_END, &[]);
+                return packet_size(packet) as i32;
+            }
+
+            DHCPREQUEST => {
+                if packet.ciaddr != Ipv4Addr::UNSPECIFIED {
+                    // 处理 RENEWING 或 REBINDING 状态
+                    if lease.is_none()
+                        || lease.as_ref().unwrap().addr != AllAddr::Addr4(packet.ciaddr)
+                    {
+                        option_put(packet, OPTION_MESSAGE_TYPE, &[6]); // DHCPNAK
+                        option_put(packet, OPTION_END, &[]);
+                        return -(packet_size(packet) as i32); // 强制广播
+                    }
+                    packet.yiaddr = packet.ciaddr;
+                } else {
+                    // 处理 SELECTING 或 INIT_REBOOT 状态
+                    if let Some(server_id) = option_find(packet, sz, 54) {
+                        if context.serv_addr.octets() != server_id {
+                            return 0;
+                        }
+                    }
+                    if let Some(requested_ip) = option_find(packet, sz, 50) {
+                        packet.yiaddr =
+                            Ipv4Addr::from(requested_ip.try_into().unwrap_or([0, 0, 0, 0]));
+                    }
+                    if lease.is_some()
+                        && lease.as_ref().unwrap().addr != AllAddr::Addr4(packet.yiaddr)
+                    {
+                        lease_prune(lease.clone(), now);
+                    }
+                    if lease.as_ref().is_none() && !address_available(context, packet.yiaddr) {
+                        option_put(packet, OPTION_MESSAGE_TYPE, &[6]); // DHCPNAK
+                        option_put(packet, OPTION_END, &[]);
+                        return -(packet_size(packet) as i32); // 强制广播
+                    }
+                }
+
+                packet.siaddr = dhcp_next_server;
+                bootp_option_put(packet, dhcp_file, dhcp_sname);
+                option_put(packet, OPTION_MESSAGE_TYPE, &[DHCPACK]);
+                option_put(packet, 54, &context.serv_addr.octets());
+                option_put(packet, 51, &dhcp_configs.lease_time.to_be_bytes());
+                do_req_options(
+                    context,
+                    packet,
+                    req_options,
+                    dhcp_opts,
+                    &domain_suffix,
+                    hostname.as_deref(),
+                );
+                option_put(packet, OPTION_END, &[]);
+                return packet_size(packet) as i32;
+            }
+
+            _ => {}
+        }
+    }
+
+    0
+}
+
+fn option_find(packet: &DhcpPacket, sz: usize, option: u8) -> Option<&[u8]> {
+    None
+}
+
+fn canonicalise(hostname: &str) -> bool {
+    true
+}
+
+fn address_available(context: &DhcpContext, addr: Ipv4Addr) -> bool {
+    true
+}
+
+fn address_allocate(context: &DhcpContext, config: &DhcpConfig, addr: &mut Ipv4Addr) -> bool {
+    true
+}
+
+fn bootp_option_put(packet: &mut DhcpPacket, dhcp_file: &mut String, dhcp_sname: &mut String) {}
+
+fn option_put<'a>(packet: &'a mut DhcpPacket, option: u8, value: &'a [u8]) -> &'a mut [u8] {
+    &mut packet.options
+}
+
+fn do_req_options<'a>(
+    context: &'a DhcpContext,
+    packet: &'a mut DhcpPacket,
+    req_options: &'a [u8],
+    dhcp_opts: &'a DhcpOpt,
+    domain_suffix: &'a str,
+    hostname: Option<&'a str>,
+) -> &'a mut [u8] {
+    &mut packet.options
+}
+
+fn packet_size(packet: &DhcpPacket) -> usize {
+    300
+}
+
+fn lease_find_by_client(_clid: &[u8]) -> Option<Box<DhcpLease>> {
+    None
+}

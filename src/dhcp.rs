@@ -20,55 +20,55 @@ const ETHER_ADDR_LEN: usize = 6;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct Ip {
-    version_and_header_length: u8,
-    tos: u8,
-    total_length: u16,
-    id: u16,
-    flags_and_fragment_offset: u16,
-    ttl: u8,
-    protocol: u8,
-    checksum: u16,
-    src_addr: Ipv4Addr,
-    dst_addr: Ipv4Addr,
+pub struct Ip {
+    pub version_and_header_length: u8,
+    pub tos: u8,
+    pub total_length: u16,
+    pub id: u16,
+    pub flags_and_fragment_offset: u16,
+    pub ttl: u8,
+    pub protocol: u8,
+    pub checksum: u16,
+    pub src_addr: Ipv4Addr,
+    pub dst_addr: Ipv4Addr,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct UdpHdr {
-    uh_sport: u16,
-    uh_dport: u16,
-    uh_ulen: u16,
-    uh_sum: u16,
+pub struct UdpHdr {
+    pub uh_sport: u16,
+    pub uh_dport: u16,
+    pub uh_ulen: u16,
+    pub uh_sum: u16,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct DhcpPacket {
-    op: u8,
-    htype: u8,
-    hlen: u8,
-    hops: u8,
-    xid: u32,
-    secs: u16,
-    flags: u16,
-    ciaddr: Ipv4Addr,
-    yiaddr: Ipv4Addr,
-    siaddr: Ipv4Addr,
-    giaddr: Ipv4Addr,
-    chaddr: [u8; 16],
-    sname: [u8; 64],
-    file: [u8; 128],
-    cookie: u32,
-    options: [u8; 308],
+pub struct DhcpPacket {
+    pub op: u8,
+    pub htype: u8,
+    pub hlen: u8,
+    pub hops: u8,
+    pub xid: u32,
+    pub secs: u16,
+    pub flags: u16,
+    pub ciaddr: Ipv4Addr,
+    pub yiaddr: Ipv4Addr,
+    pub siaddr: Ipv4Addr,
+    pub giaddr: Ipv4Addr,
+    pub chaddr: [u8; 16],
+    pub sname: [u8; 64],
+    pub file: [u8; 128],
+    pub cookie: u32,
+    pub options: [u8; 308],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct UdpDhcpPacket {
-    ip: Ip,
-    udp: UdpHdr,
-    data: DhcpPacket,
+pub struct UdpDhcpPacket {
+    pub ip: Ip,
+    pub udp: UdpHdr,
+    pub data: DhcpPacket,
 }
 // DHCP 配置列表中查找与给定参数匹配的配置项
 pub fn find_config(
@@ -191,7 +191,7 @@ pub fn dhcp_packet(
 
         // 检查数据包是否为有效大小
         if sz > (std::mem::size_of::<DhcpPacket>()) {
-            lease_prune(now); // 清除过期租约
+            lease_prune(None, now); // 清除过期租约
 
             // 提前处理 dhcp_file 和 dhcp_sname，以避免所有权问题
             let mut default_file = String::new();
@@ -297,25 +297,4 @@ fn ipv4_checksum(packet: &MutableIpv4Packet) -> u16 {
 
     // 返回反码
     !(sum as u16)
-}
-
-fn lease_prune(now: SystemTime) {
-    // 实现租约清除逻辑
-}
-
-fn dhcp_reply(
-    context: &DhcpContext,
-    packet: &mut DhcpPacket,
-    sz: usize,
-    now: SystemTime,
-    namebuff: &mut [u8],
-    dhcp_opts: &DhcpOpt,
-    dhcp_configs: &DhcpConfig,
-    domain_suffix: String,
-    dhcp_file: &mut String,
-    dhcp_sname: &mut String,
-    dhcp_next_server: Ipv4Addr,
-) -> i32 {
-    // 处理DHCP回复逻辑的占位符
-    0
 }
