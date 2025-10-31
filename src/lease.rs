@@ -309,3 +309,18 @@ pub fn lease_prune(mut target: Option<Box<DhcpLease>>, now: SystemTime) {
         }
     }
 }
+
+// 全局租约链表中查找指定的IPv4地址
+pub fn lease_find_by_addr(addr: Ipv4Addr) -> bool {
+    unsafe {
+        // 遍历全局租约链表
+        let mut lease = &LEASES;
+        while let Some(ref current_lease) = lease {
+            if current_lease.addr == cache::AllAddr::Addr4(addr) {
+                return true; // 找到匹配的租约
+            }
+            lease = &current_lease.next; // 移动到下一个节点
+        }
+    }
+    false // 未找到匹配的租约
+}

@@ -12,6 +12,7 @@ pub mod logs;
 pub mod network;
 pub mod option;
 pub mod rfc1035;
+pub mod rfc2131;
 pub mod util;
 use cache::*;
 use daemonize::Daemonize;
@@ -167,11 +168,11 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         &mut bogus_addr,
         &serv_addrs,
         &mut cachesize,
-        Some(&mut port),
-        Some(&mut query_port),
-        Some(&mut local_ttl),
+        &mut port,
+        &mut query_port,
+        &mut local_ttl,
         &mut addn_hosts,
-        &dhcp,
+        &mut dhcp,
         &mut dhcp_conf,
         &mut dhcp_opts,
         &mut dhcp_file,

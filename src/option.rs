@@ -6,14 +6,13 @@
 
 use std::fs::File;
 use std::io::{self, BufRead};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::rc::Rc;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::process;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::{default, process};
 
-use users::cache;
+// use users::cache;
 
+use crate::die;
 use crate::util::canonicalise;
 pub type SaFamilyT = u16;
 pub type InPortT = u16;
@@ -107,7 +106,7 @@ pub struct ServerFd {
     pub next: Option<Box<ServerFd>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Server {
     pub addr: MySockAddr,
     pub source_addr: MySockAddr,
@@ -143,6 +142,27 @@ pub struct DhcpContext {
     pub next: Option<Box<DhcpContext>>,
 }
 
+impl Default for DhcpContext {
+    fn default() -> Self {
+        DhcpContext {
+            fd: 0,
+            rawfd: 0,
+            ifindex: 0,
+            iface: "".to_string(),
+            hwaddr: [0; ETHER_ADDR_LEN],
+            lease_time: 0,
+            // 地址先默认给0  0.0.0.0 有特殊用途 目前不知道这样给会不会有问题 待测试
+            serv_addr: Ipv4Addr::new(0, 0, 0, 0),
+            netmask: Ipv4Addr::new(0, 0, 0, 0),
+            broadcast: Ipv4Addr::new(0, 0, 0, 0),
+            start: Ipv4Addr::new(0, 0, 0, 0),
+            end: Ipv4Addr::new(0, 0, 0, 0),
+            last: Ipv4Addr::new(0, 0, 0, 0),
+            next: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DhcpConfig {
     pub clid_len: usize,
@@ -161,6 +181,17 @@ pub struct DhcpOpt {
     pub val: Vec<u8>,
     pub next: Option<Box<DhcpOpt>>,
 }
+
+// 定义为32位  最多4,294,967,295s 约49,710天
+const DEFLEASE: u32 = 3600; /* default lease time, 1 hour */
+
+const SERV_FROM_RESOLV: u32 = 1; /* 1 for servers from resolv, 0 for command line. */
+const SERV_NO_ADDR: u32 = 2; /* no server, this domain is local only */
+const SERV_LITERAL_ADDRESS: u32 = 4; /* addr is the answer, not the server */
+const SERV_HAS_SOURCE: u32 = 8; /* source address specified */
+const SERV_HAS_DOMAIN: u32 = 16; /* server for one domain only */
+const SERV_FOR_NODOTS: u32 = 32; /* server for names with no domain part only */
+const SERV_TYPE: u32 = (SERV_HAS_DOMAIN | SERV_FOR_NODOTS);
 
 const CONFILE: &str = "/etc/utdnsmasq.conf";
 const OPT_BOGUSPRIV: u32 = 1;
@@ -213,11 +244,11 @@ pub fn read_opts(
     bogus_addr: &mut Option<Box<BogusAddr>>,
     serv_addrs: &Option<Box<Server>>,
     cachesize: &mut usize,
-    port: Option<&mut u16>,
-    query_port: Option<&mut i32>,
-    local_ttl: Option<&mut u64>,
+    port: &mut u16,
+    query_port: &mut i32,
+    local_ttl: &mut u64,
     addn_hosts: &mut Option<String>,
-    dhcp: &Option<Box<DhcpContext>>,
+    dhcp: &mut Option<Box<DhcpContext>>,
     dhcp_conf: &Option<Box<DhcpConfig>>,
     opts: &Option<Box<DhcpOpt>>,
     dhcp_file: &Option<&mut String>,
@@ -272,15 +303,16 @@ pub fn read_opts(
         }
 
         match option {
+            // C
             "conf-file" => {
                 conffile = optarg;
                 conffile_set = true;
             }
-
+            // x
             "pid-file" => {
                 *runfile = Some(optarg.to_string());
             }
-
+            // r
             "resolv-file" => {
                 // 全部clone可能会有问题  先这样 可以解析
                 let name: Option<String> = Some(optarg.to_string());
@@ -303,7 +335,7 @@ pub fn read_opts(
                 }
                 *resolv_files = list.clone();
             }
-
+            // m
             "mx-host" => {
                 if canonicalise(optarg).is_none() {
                     option = "?";
@@ -311,7 +343,7 @@ pub fn read_opts(
                     *mxname = Some(optarg.to_string());
                 }
             }
-
+            // c
             "cache-size" => {
                 let mut size: i32 = optarg.parse().unwrap();
                 if size < 0 {
@@ -322,7 +354,7 @@ pub fn read_opts(
 
                 *cachesize = size as usize;
             }
-
+            // t
             "mx-target" => {
                 if canonicalise(optarg).is_none() {
                     option = "?";
@@ -330,7 +362,7 @@ pub fn read_opts(
                     *mxtarget = Some(optarg.to_string());
                 }
             }
-
+            // l
             "dhcp-leasefile" => {
                 *lease_file = Some(optarg.to_string());
             }
@@ -439,10 +471,178 @@ pub fn read_opts(
                 *if_addrs = Some(Box::new(new.clone()));
             }
 
+            // S A   暂未完成
+            "server" | "address" => {
+                let mut serv: Server = Server::default();
+                let mut newlist: Server = Server::default();
+
+                if optarg.starts_with("/") {
+                    let mut end: String = String::new();
+                    let domains: Vec<&str> = optarg.split('/').filter(|s| !s.is_empty()).collect();
+
+                    for domain in domains {
+                        let domain = canonicalise(domain);
+                        if domain.is_none() {
+                            option = "?";
+                            break;
+                        }
+                        serv.next = Some(Box::new(newlist.clone()));
+                        serv.sfd = None;
+                        serv.domain = domain.clone();
+                        serv.flags = if domain.is_some() {
+                            SERV_HAS_DOMAIN
+                        } else {
+                            SERV_FOR_NODOTS
+                        };
+                        newlist = serv.clone();
+                    }
+
+                    if Some(newlist.clone()).is_none() {
+                        option = "?";
+                        break;
+                    }
+                } else {
+                    newlist.next = None;
+                    newlist.flags = 0;
+                    newlist.sfd = None;
+                    newlist.domain = None;
+                }
+
+                if option == "address" {
+                    newlist.flags |= SERV_LITERAL_ADDRESS;
+                    if newlist.flags & SERV_TYPE == 0 {
+                        option = "?";
+                        break;
+                    }
+                }
+            }
+
+            // p
+            "port" => {
+                let ret = optarg.parse::<u16>();
+                match ret {
+                    Ok(num) => {
+                        *port = num;
+                    }
+                    Err(_) => {
+                        // 参数类型不正确  直接退出
+                        die("port must be an integer", "");
+                    }
+                }
+            }
+
+            // Q
+            "query-port" => {
+                let ret = optarg.parse::<i32>();
+                match ret {
+                    Ok(num) => {
+                        *query_port = num;
+                    }
+                    Err(_) => {
+                        // 参数类型不正确  直接退出
+                        die("query_port must be an integer", "");
+                    }
+                }
+            }
+
+            // T
+            "local-ttl" => {
+                let ret = optarg.parse::<u64>();
+                match ret {
+                    Ok(num) => {
+                        *local_ttl = num;
+                    }
+                    Err(_) => {
+                        // 参数类型不正确  直接退出
+                        die("local_ttl must be an integer", "");
+                    }
+                }
+            }
+
+            // F
+            "dhcp-range" => {
+                let mut comma: String = String::new();
+                let mut new: DhcpContext = DhcpContext::default();
+
+                // 将dhcp值赋值给new.next 并将dhcp置为空
+                new.next = std::mem::replace(dhcp, None);
+
+                new.lease_time = DEFLEASE; // 默认租约时间
+
+                if optarg.contains(",") {
+                    let mut iter: Vec<&str> = optarg.split(',').collect();
+                    // 如果只分出来两个字段 则将第三个字段置为空
+                    // 字段1：起始地址 字段2：结束地址 字段3：租约时间
+                    if iter.len() == 2 {
+                        iter.push("");
+                    }
+
+                    // 获取ip范围起始地址
+                    match Ipv4Addr::from_str(iter[0]) {
+                        Ok(ip) => {
+                            new.start = ip;
+                        }
+                        Err(_) => {
+                            option = "?";
+                        }
+                    }
+
+                    // 获取ip范围结束地址
+                    match Ipv4Addr::from_str(iter[1]) {
+                        Ok(ip) => {
+                            new.end = ip;
+                        }
+                        Err(_) => {
+                            option = "?";
+                        }
+                    }
+
+                    // 解析租约时间
+                    if iter[2] != "" {
+                        let opt = iter[2];
+                        if opt == "infinite" {
+                            new.lease_time = 0xffffffff;
+                        } else {
+                            let mut fac: u32 = 1;
+                            if opt.len() > 0 {
+                                match opt.chars().last() {
+                                    Some('h') | Some('H') => fac *= 60 * 60,
+                                    Some('m') | Some('M') => fac *= 60,
+                                    _ => {
+                                        println!("时间格式错误");
+                                    }
+                                }
+                                // 解析时间
+                                let ret = opt[..opt.len() - 1].parse::<u32>();
+                                match ret {
+                                    Ok(time) => {
+                                        new.lease_time = time * fac;
+                                    }
+                                    Err(_) => {
+                                        println!("时间格式错误");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    new.last = new.start;
+                    new.iface = String::from("");
+                } else {
+                    option = "?";
+                }
+
+                *dhcp = Some(Box::new(new.clone()));
+            }
+
             _ => {
                 println!("bad argument for option {}", option);
             }
         }
+
+        // if option == "?" {
+        //     die!("bad argument for option {:#?}", buff);
+        // }
     }
 
     0
