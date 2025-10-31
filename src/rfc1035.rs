@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::util::hostname_isequal;
+use crate::rfc2131::option_find;
+use crate::util::{canonicalise, hostname_isequal};
 use crate::*;
 use byteorder::{ByteOrder, NetworkEndian};
 use std::time::SystemTime;
@@ -754,7 +755,7 @@ pub fn dhcp_reply(
         let len = hostname_option.len();
         let mut hostname_buf = String::from_utf8_lossy(&hostname_option[..len]).to_string();
         hostname_buf.truncate(len);
-        if canonicalise(&hostname_buf) {
+        if canonicalise(&hostname_buf).is_some() {
             Some(hostname_buf)
         } else {
             None
@@ -858,22 +859,6 @@ pub fn dhcp_reply(
     }
 
     0
-}
-
-fn option_find(packet: &DhcpPacket, sz: usize, option: u8) -> Option<&[u8]> {
-    None
-}
-
-fn canonicalise(hostname: &str) -> bool {
-    true
-}
-
-fn address_available(context: &DhcpContext, addr: Ipv4Addr) -> bool {
-    true
-}
-
-fn address_allocate(context: &DhcpContext, config: &DhcpConfig, addr: &mut Ipv4Addr) -> bool {
-    true
 }
 
 fn bootp_option_put(packet: &mut DhcpPacket, dhcp_file: &mut String, dhcp_sname: &mut String) {}

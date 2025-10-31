@@ -298,3 +298,66 @@ fn ipv4_checksum(packet: &MutableIpv4Packet) -> u16 {
     // 返回反码
     !(sum as u16)
 }
+
+// 从 DHCP 地址池中分配一个未被使用的 IPv4 地址，并将其返回给调用者
+pub fn address_allocate(context: &DhcpContext, config: &DhcpConfig, addr: &mut Ipv4Addr) -> bool {
+    let mut current = context.last; // 从上次分配的地址开始
+    let start = context.last; // 记录起始地址以避免死循环
+
+    loop {
+        // 如果当前地址已到达地址池末尾，则从起始地址重新开始
+        if current == context.end {
+            current = context.start;
+        } else {
+            // 将当前地址递增
+            current = Ipv4Addr::from(u32::from(current).wrapping_add(1));
+        }
+
+        // 检查当前地址是否已被租约占用
+        if !lease_find_by_addr(current) {
+            let mut cfg = Some(config);
+
+            // 遍历静态配置链表
+            while let Some(c) = cfg {
+                if c.addr == current {
+                    break; // 如果地址被静态分配，跳过
+                }
+                cfg = c.next.as_deref(); // 移动到下一个配置节点
+            }
+
+            // 如果未找到匹配的静态配置，地址可用
+            if cfg.is_none() {
+                *addr = current; // 将分配的地址返回
+                return true; // 分配成功
+            }
+        }
+
+        // 如果循环回到了起始地址，说明所有地址都不可用
+        if current == start {
+            break;
+        }
+    }
+
+    false // 分配失败
+}
+
+// 用于检查给定的 IPv4 地址是否在 DHCP 上下文中可用
+pub fn address_available(context: &DhcpContext, addr: Ipv4Addr) -> bool {
+    // 将 IPv4 地址转换为 u32 进行比较
+    let addr_u32 = u32::from(addr);
+    let start_u32 = u32::from(context.start);
+    let end_u32 = u32::from(context.end);
+
+    // 检查地址是否在允许范围内
+    if addr_u32 < start_u32 || addr_u32 > end_u32 {
+        return false;
+    }
+
+    // 检查地址是否已存在于现有租约中
+    if lease_find_by_addr(addr) {
+        return false;
+    }
+
+    // 地址可用
+    true
+}
