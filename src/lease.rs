@@ -11,6 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, Seek, Write};
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
+use std::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ETHER_ADDR_LEN: usize = 6;
@@ -19,16 +20,16 @@ static mut FILE_DIRTY: Option<u32> = None;
 static mut LEASES: Option<Box<DhcpLease>> = None;
 static LEASE_FILE_PATH: &str = "/var/lib/misc/dnsmasq.leases";
 
-#[derive(Debug)]
-struct DhcpLease {
-    clid_len: usize,
-    clid: Vec<u8>,
-    hostname: Option<String>,
-    fqdn: Option<String>,
-    expires: u64, // 使用u64表示UNIX时间戳
-    hwaddr: [u8; ETHER_ADDR_LEN],
-    addr: AllAddr,
-    next: Option<Box<DhcpLease>>,
+#[derive(Debug, Clone)]
+pub struct DhcpLease {
+    pub clid_len: usize,
+    pub clid: Vec<u8>,
+    pub hostname: Option<String>,
+    pub fqdn: Option<String>,
+    pub expires: u64, // 使用u64表示UNIX时间戳
+    pub hwaddr: [u8; ETHER_ADDR_LEN],
+    pub addr: AllAddr,
+    pub next: Option<Box<DhcpLease>>,
 }
 
 pub fn lease_init(
@@ -257,4 +258,54 @@ pub fn lease_update_dns(caches: &mut Cache, force_dns: i32) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+// 清理 DHCP 租约链表：
+pub fn lease_prune(mut target: Option<Box<DhcpLease>>, now: SystemTime) {
+    unsafe {
+        let now_unix = now
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs();
+
+        let mut lease = LEASES.as_deref_mut();
+        let mut up: *mut Option<Box<DhcpLease>> = &mut LEASES;
+
+        while let Some(current) = lease {
+            // 检查租约是否过期
+            let expired = current.expires != 0 && now_unix > current.expires;
+
+            // 判断当前租约是否需要被删除
+            let target_match = if let Some(ref target_box) = target {
+                ptr::eq(current as *mut DhcpLease, &**target_box as *const DhcpLease)
+            } else {
+                false
+            };
+
+            if expired || target_match {
+                // 标记文件和DNS为脏
+                FILE_DIRTY = Some(1);
+
+                if current.hostname.is_some() {
+                    DNS_DIRTY = Some(1);
+                }
+
+                // 从链表中移除当前租约
+                if let Some(up_ref) = &mut *up {
+                    *up_ref = current.next.take().expect("REASON");
+                }
+
+                // 如果是目标节点，取出后消耗掉（消费掉`target`以防止内存泄漏）
+                if target_match {
+                    target.take();
+                }
+
+                // 由于 Box 的自动内存管理，数据会自动释放
+            } else {
+                up = &mut current.next;
+            }
+
+            lease = current.next.as_deref_mut();
+        }
+    }
 }
