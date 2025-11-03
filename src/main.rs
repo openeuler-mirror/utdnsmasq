@@ -115,8 +115,8 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut if_addrs: Option<Box<Iname>> = None; // 用于存储接口地址
     let mut if_except: Option<Box<Iname>> = None; // 用于存储例外情况
     let mut bogus_addr: Option<Box<BogusAddr>> = None;
-    let mut dhcp_sname: Option<&mut String> = None;
-    let mut dhcp_file: Option<&mut String> = Default::default();
+    let mut dhcp_sname: Option<String> = None;
+    let mut dhcp_file: Option<String> = Default::default();
     let serv_addrs: Option<Box<Server>> = None;
     let mut dnamebuff = vec![0u8; MAXDNAME];
     let mut packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];

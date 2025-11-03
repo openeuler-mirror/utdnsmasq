@@ -126,7 +126,7 @@ pub fn lease_init(
     lease_file.as_raw_fd()
 }
 
-fn lease_set_hostname(name: Option<&str>, suffix: Option<String>, leases: &mut Box<DhcpLease>) {
+pub fn lease_set_hostname(name: Option<&str>, suffix: Option<String>, leases: &mut Box<DhcpLease>) {
     let mut new_name: Option<String> = None;
     let mut new_fqdn: Option<String> = None;
 
@@ -323,4 +323,91 @@ pub fn lease_find_by_addr(addr: Ipv4Addr) -> bool {
         }
     }
     false // 未找到匹配的租约
+}
+
+// 通过客户端标识符（clid）查找租约
+pub fn lease_find_by_client(clid: &[u8], clid_len: usize) -> Option<Box<DhcpLease>> {
+    unsafe {
+        let mut current = &LEASES;
+
+        if clid_len > 0 {
+            // 使用客户端标识符 (clid) 查找
+            while let Some(lease) = current {
+                if lease.clid_len == clid_len && lease.clid == clid {
+                    return Some(lease.clone());
+                }
+                current = &lease.next;
+            }
+        } else {
+            // 使用硬件地址 (hwaddr) 查找
+            while let Some(lease) = current {
+                if lease.clid.is_empty() && lease.hwaddr[..] == clid[..ETHER_ADDR_LEN] {
+                    return Some(lease.clone());
+                }
+                current = &lease.next;
+            }
+        }
+    }
+
+    None
+}
+
+// 分配一个新的DHCP租约并将其添加到链表的头部
+pub fn lease_allocate(
+    clid: Option<&[u8]>,
+    clid_len: usize,
+    addr: AllAddr,
+) -> Option<Box<DhcpLease>> {
+    unsafe {
+        // 分配新的租约
+        let mut lease = Box::new(DhcpLease {
+            clid_len,
+            clid: match clid {
+                Some(data) if data.len() == clid_len => data.to_vec(),
+                _ => Vec::new(),
+            },
+            hostname: None,
+            fqdn: None,
+            expires: 1,
+            hwaddr: [0; ETHER_ADDR_LEN],
+            addr,
+            next: None,
+        });
+
+        // 将新租约添加到链表的头部
+        lease.next = LEASES.take();
+        LEASES = Some(lease.clone());
+
+        // 标记文件已修改
+        FILE_DIRTY = Some(1);
+
+        Some(lease)
+    }
+}
+
+// 更新 DHCP 租约中的硬件地址
+pub fn lease_set_hwaddr(lease: &mut Option<Box<DhcpLease>>, hwaddr: &[u8]) {
+    if let Some(ref mut lease) = lease {
+        if lease.hwaddr[..] != hwaddr[..] {
+            // 标记文件已修改
+            unsafe { FILE_DIRTY = Some(1) };
+
+            // 复制硬件地址到租约的 `hwaddr` 字段
+            lease.hwaddr.copy_from_slice(&hwaddr[..ETHER_ADDR_LEN]);
+        }
+    }
+}
+
+// 更新 DHCP 租约的过期时间
+pub fn lease_set_expires(lease: &mut Option<Box<DhcpLease>>, exp: u64) {
+    if let Some(lease) = lease.as_mut() {
+        if exp != lease.expires {
+            // 标记文件和 DNS 数据已修改
+            unsafe { FILE_DIRTY = Some(1) };
+            unsafe { DNS_DIRTY = Some(1) };
+        }
+
+        // 设置新的过期时间
+        lease.expires = exp;
+    }
 }
