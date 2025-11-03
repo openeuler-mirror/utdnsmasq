@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use crate::rfc2131::*;
 use crate::*;
 use pnet::packet::ethernet::MutableEthernetPacket;
 use pnet::packet::ip::IpNextHeaderProtocols;
@@ -43,7 +44,7 @@ pub struct UdpHdr {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DhcpPacket {
     pub op: u8,
     pub htype: u8,
@@ -56,7 +57,7 @@ pub struct DhcpPacket {
     pub yiaddr: Ipv4Addr,
     pub siaddr: Ipv4Addr,
     pub giaddr: Ipv4Addr,
-    pub chaddr: [u8; 16],
+    pub chaddr: [u8; 6],
     pub sname: [u8; 64],
     pub file: [u8; 128],
     pub cookie: u32,
@@ -171,8 +172,8 @@ pub fn dhcp_packet(
     now: SystemTime,
     namebuff: &mut [u8],
     domain_suffix: Option<String>,
-    dhcp_file: &mut Option<&mut String>,
-    dhcp_sname: &mut Option<&mut String>,
+    dhcp_file: &mut Option<String>,
+    dhcp_sname: &mut Option<String>,
     dhcp_next_server: Ipv4Addr,
 ) {
     // 将接收到的数据转换为 UdpDhcpPacket 结构体
@@ -194,11 +195,12 @@ pub fn dhcp_packet(
             lease_prune(None, now); // 清除过期租约
 
             // 提前处理 dhcp_file 和 dhcp_sname，以避免所有权问题
-            let mut default_file = String::new();
-            let dhcp_file_ref = dhcp_file.as_deref_mut().unwrap_or(&mut default_file);
+            // let mut default_file = String::new();
+            // let dhcp_file_ref = dhcp_file.as_deref_mut().unwrap_or(&mut default_file);
 
-            let mut default_sname = String::new();
-            let dhcp_sname_ref = dhcp_sname.as_deref_mut().unwrap_or(&mut default_sname);
+            // let mut default_sname = String::new();
+            // let dhcp_sname_ref = dhcp_sname.as_deref_mut().unwrap_or(&mut default_sname);
+            let domain_suffix_str = domain_suffix.as_deref().unwrap_or("");
 
             let newlen = dhcp_reply(
                 context,
@@ -207,10 +209,10 @@ pub fn dhcp_packet(
                 now,
                 namebuff,
                 &dhcp_opts.unwrap(),
-                &dhcp_configs.unwrap(),
-                domain_suffix.unwrap_or_default(),
-                dhcp_file_ref,
-                dhcp_sname_ref,
+                dhcp_configs,
+                domain_suffix_str,
+                dhcp_file,
+                dhcp_sname,
                 dhcp_next_server,
             );
 
@@ -300,7 +302,11 @@ fn ipv4_checksum(packet: &MutableIpv4Packet) -> u16 {
 }
 
 // 从 DHCP 地址池中分配一个未被使用的 IPv4 地址，并将其返回给调用者
-pub fn address_allocate(context: &DhcpContext, config: &DhcpConfig, addr: &mut Ipv4Addr) -> bool {
+pub fn address_allocate(
+    context: &DhcpContext,
+    config: Option<Box<DhcpConfig>>,
+    addr: &mut Ipv4Addr,
+) -> bool {
     let mut current = context.last; // 从上次分配的地址开始
     let start = context.last; // 记录起始地址以避免死循环
 
@@ -315,14 +321,14 @@ pub fn address_allocate(context: &DhcpContext, config: &DhcpConfig, addr: &mut I
 
         // 检查当前地址是否已被租约占用
         if !lease_find_by_addr(current) {
-            let mut cfg = Some(config);
+            let mut cfg = config.as_ref();
 
             // 遍历静态配置链表
             while let Some(c) = cfg {
                 if c.addr == current {
                     break; // 如果地址被静态分配，跳过
                 }
-                cfg = c.next.as_deref(); // 移动到下一个配置节点
+                cfg = c.next.as_ref(); // 使用 as_ref() 来保持类型一致性
             }
 
             // 如果未找到匹配的静态配置，地址可用

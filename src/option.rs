@@ -251,8 +251,8 @@ pub fn read_opts(
     dhcp: &mut Option<Box<DhcpContext>>,
     dhcp_conf: &Option<Box<DhcpConfig>>,
     opts: &Option<Box<DhcpOpt>>,
-    dhcp_file: &Option<&mut String>,
-    dhcp_sname: &Option<&mut String>,
+    dhcp_file: &Option<String>,
+    dhcp_sname: &Option<String>,
     dhcp_next_server: Ipv4Addr,
 ) -> u32 {
     let mut flags: u32 = 0;
