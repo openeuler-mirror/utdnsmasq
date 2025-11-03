@@ -14,6 +14,7 @@ pub mod option;
 pub mod rfc1035;
 pub mod rfc2131;
 pub mod util;
+use byteorder::{ByteOrder, NetworkEndian};
 use cache::*;
 use daemonize::Daemonize;
 use dhcp::*;
@@ -27,10 +28,13 @@ use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, SigmaskHow,
 use nix::sys::stat::{umask, Mode};
 use nix::unistd::{chdir, close, geteuid, getuid, setgid, setuid, Gid, Uid};
 use option::*;
+use pnet::util::Octets;
 use rfc1035::*;
 use std::fs::File;
 use std::io::Write;
-use std::net::Ipv4Addr;
+use std::mem;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::os::fd::FromRawFd;
 use std::path::Path;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +47,94 @@ static SIGHUP_FLAG: AtomicBool = AtomicBool::new(true);
 static SIGUSR1_FLAG: AtomicBool = AtomicBool::new(false);
 static SIGUSR2_FLAG: AtomicBool = AtomicBool::new(false);
 static SIGTERM_FLAG: AtomicBool = AtomicBool::new(false);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Header {
+    pub id: u16,
+
+    pub qr: u8,
+    pub opcode: u8,
+    pub aa: u8,
+    pub tc: u8,
+    pub rd: u8,
+
+    pub ra: u8,
+    pub unused: u8,
+    pub ad: u8,
+    pub cd: u8,
+    pub rcode: u8,
+
+    pub qdcount: u16,
+    pub ancount: u16,
+    pub nscount: u16,
+    pub arcount: u16,
+}
+
+impl Header {
+    pub fn new() -> Self {
+        Header {
+            id: 0,
+            qr: 0,
+            opcode: 0,
+            aa: 0,
+            tc: 0,
+            rd: 0,
+            ra: 0,
+            unused: 0,
+            ad: 0,
+            cd: 0,
+            rcode: 0,
+            qdcount: 0,
+            ancount: 0,
+            nscount: 0,
+            arcount: 0,
+        }
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 12 {
+            return None;
+        }
+
+        let id = u16::from_be_bytes([bytes[0], bytes[1]]);
+        let third_byte = bytes[2];
+        let fourth_byte = bytes[3];
+        let qdcount = u16::from_be_bytes([bytes[4], bytes[5]]);
+        let ancount = u16::from_be_bytes([bytes[6], bytes[7]]);
+        let nscount = u16::from_be_bytes([bytes[8], bytes[9]]);
+        let arcount = u16::from_be_bytes([bytes[10], bytes[11]]);
+
+        Some(Header {
+            id,
+            qr: (third_byte >> 7) & 0x1,
+            opcode: (third_byte >> 3) & 0xF,
+            aa: (third_byte >> 2) & 0x1,
+            tc: (third_byte >> 1) & 0x1,
+            rd: third_byte & 0x1,
+            ra: (fourth_byte >> 7) & 0x1,
+            unused: (fourth_byte >> 6) & 0x1,
+            ad: (fourth_byte >> 5) & 0x1,
+            cd: (fourth_byte >> 4) & 0x1,
+            rcode: fourth_byte & 0xF,
+            qdcount,
+            ancount,
+            nscount,
+            arcount,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![0u8; mem::size_of::<Header>()];
+        NetworkEndian::write_u16(&mut bytes[0..2], self.id);
+        bytes[2] = (self.qr << 7) | (self.opcode << 3) | (self.aa << 2) | (self.tc << 1) | self.rd;
+        bytes[3] = (self.ra << 7) | (self.ad << 5) | (self.cd << 4) | self.rcode;
+        NetworkEndian::write_u16(&mut bytes[4..6], self.qdcount);
+        NetworkEndian::write_u16(&mut bytes[6..8], self.ancount);
+        NetworkEndian::write_u16(&mut bytes[8..10], self.nscount);
+        NetworkEndian::write_u16(&mut bytes[10..12], self.arcount);
+        bytes
+    }
+}
 
 extern "C" fn sig_handler(sig: i32) {
     match sig {
@@ -70,6 +162,7 @@ const LEASEFILE: &str = "/var/lib/misc/dnsmasq.leases";
 const VERSION: &str = "2.0";
 const OPT_NO_POLL: u32 = 32;
 const OPT_LOG: u32 = 4;
+const F_QUERY: u32 = 8192;
 
 // 存储接口名称和地址
 #[derive(Clone)]
@@ -723,6 +816,81 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                 dhcp_tmp = dtp.next.as_deref_mut();
             }
         }
+        // let mut iface_opt = interfaces.as_mut();
+        // while let Some(iface) = iface_opt {
+        //     if iface.valid {
+        //         // 接收数据包
+        //         let udp_socket = unsafe { UdpSocket::from_raw_fd(iface.fd) };
+        //         let (n, src_addr) = udp_socket.recv_from(&mut packet);
+        //         let header = Header::from_bytes(&packet[..n]);
+
+        //         let mut udpaddr = MySockAddr {
+        //             sa: SockAddr {
+        //                 sa_family: iface.addr.sa.sa_family,
+        //                 sa_data: [0; 14],
+        //             },
+        //         };
+
+        //         match src_addr {
+        //             SocketAddr::V4(addr) => {
+        //                 udpaddr = MySockAddr {
+        //                     in_: SockAddrIn {
+        //                         sin_family: AF_INET as SaFamilyT,
+        //                         sin_port: addr.port(),
+        //                         sin_addr: InAddr { s_addr: u32::from(*addr.ip()) },
+        //                         sin_zero: [0; 8],
+        //                     },
+        //                 };
+        //                 log_query(&mut caches, F_QUERY | F_IPV6 | F_FORWARD, &dnamebuff, Some(&udpaddr.in_.sin_addr.s_addr.octets()));
+        //             }
+        //             SocketAddr::V6(addr) => {
+        //                 udpaddr = MySockAddr {
+        //                     in6: SockAddrIn6 {
+        //                         sin6_family: AF_INET6 as SaFamilyT,
+        //                         sin6_port: addr.port(),
+        //                         sin6_flowinfo: 0,
+        //                         sin6_addr: In6Addr { s6_addr: addr.ip().octets() },
+        //                         sin6_scope_id: addr.scope_id(),
+        //                     },
+        //                 };
+        //                 log_query(&mut caches, F_QUERY | F_IPV6 | F_FORWARD, &dnamebuff, Some(&udpaddr.in6.sin6_addr.s6_addr));
+        //             }
+        //         }
+
+        //         // 回答请求
+        //         let m = answer_request(
+        //             &header,
+        //             &mut packet[..],
+        //             n as u32,
+        //             mxname,
+        //             mxtarget,
+        //             options,
+        //             now,
+        //             local_ttl,
+        //             dnamebuff
+        //         );
+
+        //         if m >= 1 {
+        //             // 从缓存回答，发送回复
+        //             udp_socket.send_to(&packet[..m  as usize], src_addr);
+        //         } else {
+        //             // 无法从缓存中回答，将请求转发给真实的 DNS 服务器
+        //             // iface.last_server = forward_query(
+        //             //     &udp_socket,
+        //             //     &src_addr,
+        //             //     &header,
+        //             //     n as u32,
+        //             //     iface.options,
+        //             //     &dnamebuff,
+        //             //     &mut iface.servers,
+        //             //     iface.last_server,
+        //             //     now,
+        //             //     iface.local_ttl,
+        //             // )?;
+        //         }
+        //     }
+        //     iface_opt = iface.next.as_mut();
+        // }
     }
 
     0
