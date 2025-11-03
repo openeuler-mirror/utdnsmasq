@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::rfc2131::option_find;
-use crate::util::{canonicalise, hostname_isequal};
+use crate::util::*;
 use crate::*;
 use byteorder::{ByteOrder, NetworkEndian};
 use std::time::SystemTime;
@@ -27,29 +26,37 @@ const T_PTR: u16 = 12; // PTR 记录
 const T_A: u16 = 1; // A 记录
 const T_AAAA: u16 = 28; // AAAA 记录
 const T_SOA: u16 = 6; // SOA 记录
-const NXDOMAIN: u8 = 3; // NXDOMAIN 响应码
+pub const NXDOMAIN: u8 = 3; // NXDOMAIN 响应码
+const T_ANY: u16 = 255;
 
 // 检查DNS响应数据包中是否存在虚假的IP地址
+
 pub fn check_for_bogus_wildcard(
-    header: &[u8],
+    header: &Option<Header>,
     qlen: usize,
     name: &mut [u8],
     baddr: Option<Box<BogusAddr>>,
     now: SystemTime,
     caches: &mut Cache,
 ) -> bool {
+    // 将 Option<Header> 转换为字节数组
+    let header_bytes = match header {
+        Some(h) => h.to_bytes(),
+        None => return false, // 无效的数据包
+    };
+
     // 跳过问题部分
-    let mut p = match skip_questions(header, qlen) {
+    let mut p = match skip_questions(&header, qlen) {
         Some(p) => p,
         None => return false, // 无效的数据包
     };
 
     // 获取回答部分数量
-    let ancount = NetworkEndian::read_u16(&header[6..8]) as usize;
+    let ancount = NetworkEndian::read_u16(&header_bytes[6..8]) as usize;
 
     // 遍历回答部分
     for _ in 0..ancount {
-        if !extract_name(header, qlen, &mut p, name, true) {
+        if !extract_name(&header_bytes, qlen, &mut p, name, true) {
             return false; // 无效的数据包
         }
 
@@ -72,7 +79,7 @@ pub fn check_for_bogus_wildcard(
                 // 对比回答部分的 IP 地址
                 if rdlen >= 4 && baddr_ref.addr.s_addr == NetworkEndian::read_u32(&p[0..4]) {
                     // 找到虚假地址，修改包头为 NXDOMAIN
-                    let mut header_mut = header.to_vec();
+                    let mut header_mut = header_bytes.clone();
                     header_mut[2] &= 0b0111_1111; // 清除 AA 位
                     header_mut[3] |= 0b1000_0000; // 设置 RA 位
                     NetworkEndian::write_u16(&mut header_mut[8..10], 0);
@@ -108,13 +115,32 @@ pub fn check_for_bogus_wildcard(
 }
 
 // 从 DNS 数据包中跳过所有问题部分，并返回指向答案部分的切片。
-fn skip_questions(header: &[u8], plen: usize) -> Option<&[u8]> {
-    let qdcount = NetworkEndian::read_u16(&header[4..6]);
-    let mut ansp = &header[12..];
+fn skip_questions(header: &Option<Header>, plen: usize) -> Option<&[u8]> {
+    // 确保 header 存在
+    let header = header.as_ref()?;
 
+    // 假设 Header 的大小为 12 字节
+    let header_size = 12;
+
+    // 获取 qdcount (问题部分的数量)
+    let qdcount = header.qdcount;
+
+    // 使用 Header 之后的数据开始解析
+    // 注意：这里假设输入的数据是在 header 之后紧跟着的 DNS 消息内容
+    // 直接对内存进行操作，避免创建新的字节数组，header 是外部引用
+    // 假设 Header 本身是一个实际包数据的一部分，计算从 Header 结束后的位置开始的数据。
+    let ansp = unsafe {
+        let ptr = header as *const Header as *const u8;
+        let data_ptr = ptr.add(header_size);
+        std::slice::from_raw_parts(data_ptr, plen.saturating_sub(header_size))
+    };
+
+    let mut ansp = &ansp[..];
+
+    // 遍历所有的问题部分
     for _ in 0..qdcount {
         loop {
-            if ansp.is_empty() || (ansp.as_ptr() as usize - header.as_ptr() as usize) >= plen {
+            if ansp.is_empty() || ansp.len() > plen {
                 return None; // 数据包无效
             }
 
@@ -170,7 +196,7 @@ fn skip_questions(header: &[u8], plen: usize) -> Option<&[u8]> {
         ansp = &ansp[4..]; // 跳过 class 和 type
     }
 
-    if (ansp.as_ptr() as usize - header.as_ptr() as usize) > plen {
+    if ansp.len() > plen {
         return None; // 数据包无效
     }
 
@@ -284,12 +310,17 @@ fn extract_name<'a>(
 // 从 DNS 响应包中提取地址记录并缓存
 pub fn extract_addresses(
     caches: &mut Cache,
-    header: &[u8],
+    header: &Option<Header>,
     qlen: usize,
     name: &mut [u8],
     now: SystemTime,
 ) {
-    let mut p = match skip_questions(header, qlen) {
+    let header_bytes = match header {
+        Some(h) => h.to_bytes(),
+        None => return,
+    };
+
+    let mut p = match skip_questions(&header, qlen) {
         Some(ptr) => ptr,
         None => return,
     };
@@ -298,10 +329,10 @@ pub fn extract_addresses(
     let psave = p;
 
     // 根据DNS响应头中的答案数量，遍历每个答案记录
-    for _ in 0..get_short(&mut &header[6..8]) {
+    for _ in 0..get_short(&mut &header_bytes[6..8]) {
         let origname = p;
 
-        if !extract_name(header, qlen, &mut p, name, true) {
+        if !extract_name(&header_bytes, qlen, &mut p, name, true) {
             return;
         }
 
@@ -333,7 +364,7 @@ pub fn extract_addresses(
                 let mut addr = vec![0; 16];
                 let name_encoding = in_arpa_name_2_addr(name, &mut addr);
                 if name_encoding != 0 {
-                    if !extract_name(header, qlen, &mut p, name, true) {
+                    if !extract_name(&header_bytes, qlen, &mut p, name, true) {
                         return;
                     }
                     cache_insert(
@@ -349,12 +380,12 @@ pub fn extract_addresses(
             T_CNAME => {
                 let mut targp = p;
                 p = psave;
-                for _ in 0..get_short(&mut &header[6..8]) {
+                for _ in 0..get_short(&mut &header_bytes[6..8]) {
                     let mut tmp = targp;
-                    if !extract_name(header, qlen, &mut tmp, name, true) {
+                    if !extract_name(&header_bytes, qlen, &mut tmp, name, true) {
                         return;
                     }
-                    let res = extract_name(header, qlen, &mut p, name, false);
+                    let res = extract_name(&header_bytes, qlen, &mut p, name, false);
                     if !res {
                         return;
                     }
@@ -377,7 +408,7 @@ pub fn extract_addresses(
                     let cttl = if ttl < cttl { ttl } else { cttl };
 
                     let mut tmp = origname;
-                    if !extract_name(header, qlen, &mut tmp, name, true) {
+                    if !extract_name(&header_bytes, qlen, &mut tmp, name, true) {
                         return;
                     }
 
@@ -408,7 +439,7 @@ pub fn extract_addresses(
                             let mut addr = vec![0; 16];
                             let name_encoding = in_arpa_name_2_addr(name, &mut addr);
                             if name_encoding != 0 {
-                                if !extract_name(header, qlen, &mut p, name, true) {
+                                if !extract_name(&header_bytes, qlen, &mut p, name, true) {
                                     return; // bad packet
                                 }
                                 cache_insert(
@@ -546,42 +577,47 @@ pub fn in_arpa_name_2_addr(name: &[u8], addrr: &mut Vec<u8>) -> u32 {
 
 pub fn extract_neg_addrs(
     caches: &mut Cache,
-    header: &[u8],
+    header: &Option<Header>,
     plen: usize,
     dnamebuff: &mut Vec<u8>,
     now: SystemTime,
 ) {
+    let header_bytes = match header {
+        Some(h) => h.to_bytes(),
+        None => return, // 无效的数据包
+    };
+
     let mut found_soa = false;
     let mut minttl: u32 = 0;
     let mut flags = F_NEG;
 
     // 确保数据包头部长度足够
-    if header.len() < 12 {
+    if header_bytes.len() < 12 {
         return; // 数据包无效
     }
 
     // 提取响应码
-    let rcode = header[3] & 0x0F;
+    let rcode = header_bytes[3] & 0x0F;
     if rcode == NXDOMAIN {
         flags |= F_NXDOMAIN;
     }
 
     // 确保无回答记录
-    let ancount = u16::from_be_bytes([header[6], header[7]]);
+    let ancount = u16::from_be_bytes([header_bytes[6], header_bytes[7]]);
     if ancount != 0 {
         return; // 存在回答记录，不生成负缓存
     }
 
     // 跳过问题部分
-    let mut p = match skip_questions(header, plen) {
+    let mut p = match skip_questions(&header, plen) {
         Some(ptr) => ptr,
         None => return, // 数据包无效
     };
 
     // 遍历 NS 部分以查找 SOA 记录
-    let nscount = u16::from_be_bytes([header[8], header[9]]);
+    let nscount = u16::from_be_bytes([header_bytes[8], header_bytes[9]]);
     for _ in 0..nscount {
-        if !extract_name(header, plen, &mut p, dnamebuff, true) {
+        if !extract_name(&header_bytes, plen, &mut p, dnamebuff, true) {
             return; // 提取失败
         }
 
@@ -596,8 +632,8 @@ pub fn extract_neg_addrs(
 
         if qclass == C_IN && qtype == T_SOA {
             // 提取 SOA 记录的 MNAME 和 RNAME
-            if !extract_name(header, plen, &mut p, dnamebuff, true)
-                || !extract_name(header, plen, &mut p, dnamebuff, true)
+            if !extract_name(&header_bytes, plen, &mut p, dnamebuff, true)
+                || !extract_name(&header_bytes, plen, &mut p, dnamebuff, true)
             {
                 return; // 提取失败
             }
@@ -628,12 +664,12 @@ pub fn extract_neg_addrs(
     cache_start_insert(caches);
 
     // 遍历问题部分并生成负缓存
-    let mut p = &header[12..]; // 重置指针到问题部分
-    let qdcount = u16::from_be_bytes([header[4], header[5]]);
+    let mut p = &header_bytes[12..]; // 重置指针到问题部分
+    let qdcount = u16::from_be_bytes([header_bytes[4], header_bytes[5]]);
     for _ in 0..qdcount {
         dnamebuff.clear(); // 清空缓冲区
 
-        if !extract_name(header, plen, &mut p, dnamebuff, true) {
+        if !extract_name(&header_bytes, plen, &mut p, dnamebuff, true) {
             return; // 提取失败
         }
 
@@ -680,4 +716,72 @@ pub fn extract_neg_addrs(
     }
 
     cache_end_insert(caches);
+}
+
+pub const QUERY: u8 = 0;
+pub fn answer_request(
+    header: &Option<Header>,
+    limit: &mut [u8],
+    qlen: u32,
+    mxname: Option<String>,
+    mxtarget: Option<String>,
+    options: u32,
+    now: SystemTime,
+    local_ttl: u64,
+    name: Vec<u8>,
+) -> i32 {
+    let mut qdcount = if let Some(h) = header {
+        u16::from_be(h.qdcount) as i32
+    } else {
+        return 0;
+    };
+
+    let mut anscount = 0;
+    let mut nxdomain = 0;
+    let mut auth = 1;
+
+    if qdcount == 0 || header.as_ref().unwrap().opcode != QUERY {
+        return 0;
+    }
+
+    let ansp = if let Some(ans) = skip_questions(header, qlen.try_into().unwrap()) {
+        ans
+    } else {
+        return 0; // bad packet
+    };
+
+    return 1;
+}
+
+pub fn extract_request(header: &Option<Header>, qlen: u32, name: &mut Vec<u8>) -> bool {
+    let header = match header {
+        Some(h) => h,
+        None => return false, // 如果 header 不存在，返回 false
+    };
+
+    let header_size = std::mem::size_of::<Header>();
+    let mut p = &header.to_bytes()[header_size..];
+    let qdcount = NetworkEndian::read_u16(&header.to_bytes()[4..6]);
+
+    if qdcount != 1 || header.opcode != QUERY {
+        return false; // 必须恰好有一个查询
+    }
+
+    let binding = header.to_bytes();
+    if !extract_name(&binding, qlen.try_into().unwrap(), &mut p, name, true) {
+        return false; // 数据包无效
+    }
+
+    let qtype = NetworkEndian::read_u16(&p[0..2]);
+    p = &p[2..];
+    let qclass = NetworkEndian::read_u16(&p[0..2]);
+    p = &p[2..];
+
+    if qclass == C_IN {
+        if qtype == T_A || qtype == T_AAAA || qtype == T_ANY {
+            return true;
+        }
+    }
+
+    false
 }

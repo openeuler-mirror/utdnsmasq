@@ -14,8 +14,8 @@ use std::os::unix::io::AsRawFd; // 用于获取文件描述符
 use util::*;
 
 const SERV_FROM_RESOLV: u32 = 1; //1 表示从解析器（resolv）获取服务器，0 表示从命令行获取。
-const AF_INET: u16 = 2;
-const AF_INET6: u16 = 10;
+pub const AF_INET: u16 = 2;
+pub const AF_INET6: u16 = 10;
 
 // 添加接口函数
 pub fn add_iface(
@@ -255,7 +255,7 @@ pub fn check_servers(
     let mut ret: Option<Box<Server>> = None;
 
     // 进行 DHCP 服务器检查
-    //  forward_init(false);
+    forward_init(false);
 
     while let Some(ref mut server) = new {
         let addr_str = match unsafe { server.addr.sa.sa_family } {
