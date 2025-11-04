@@ -893,13 +893,13 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                         }
                     }
                     // 尝试解析数据包的头部
-                    let header = Header::from_bytes(&packet[..n]);
-                    if let Some(header) = header {
+                    let mut header = Header::from_bytes(&packet[..n]);
+                    if let Some(ref mut header) = header {
                         if !header.qr == 0 {
                             // 如果是查询请求，提取请求并处理
-                            if extract_request(&Some(header), n as u32, &mut dnamebuff) {
+                            if extract_request(&Some(*header), n as u32, &mut dnamebuff) {
                                 let m = answer_request(
-                                    &Some(header),
+                                    &mut Some(*header),
                                     &mut packet[..],
                                     n as u32,
                                     mxname.clone(),

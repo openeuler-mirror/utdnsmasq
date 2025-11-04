@@ -30,6 +30,14 @@ const T_SOA: u16 = 6; // SOA 记录
 pub const NXDOMAIN: u8 = 3; // NXDOMAIN 响应码
 const T_ANY: u16 = 255;
 const NOERROR: u8 = 0;
+const IN6ADDRSZ: u16 = 16;
+pub const QUERY: u8 = 0;
+pub const C_CHAOS: u16 = 3;
+pub const T_TXT: u16 = 16;
+const OPT_FILTER: u32 = 2;
+const T_SRV: u16 = 33;
+const T_MX: u16 = 15;
+const T_MAILB: u16 = 253;
 
 // 检查DNS响应数据包中是否存在虚假的IP地址
 
@@ -720,13 +728,8 @@ pub fn extract_neg_addrs(
     cache_end_insert(caches);
 }
 
-pub const QUERY: u8 = 0;
-pub const C_CHAOS: u16 = 3;
-pub const T_TXT: u16 = 16;
-const OPT_FILTER: u32 = 2;
-const T_SRV: u16 = 33;
 pub fn answer_request(
-    header: &Option<Header>,
+    header: &mut Option<Header>,
     limit: &mut [u8],
     qlen: u32,
     mxname: Option<String>,
@@ -935,10 +938,195 @@ pub fn answer_request(
                     }
                 }
             }
+            if qtype == T_A || qtype == T_ANY {
+                if (options & OPT_FILTER) != 0 && qtype == T_ANY && name_str.contains('_') {
+                    ans = 1;
+                } else {
+                    crecp = None;
+                    while let Some(crec) = crecp.take() {
+                        let ttl = if crec.flags & (F_IMMORTAL | F_DHCP) != 0 {
+                            local_ttl
+                        } else {
+                            match crec.ttd.duration_since(now) {
+                                Ok(duration) => duration.as_secs() as u64,
+                                Err(_) => return 0,
+                            }
+                        };
+
+                        if qtype == T_ANY && (crec.flags & (F_HOSTS | F_DHCP)) == 0 {
+                            return 0;
+                        }
+
+                        ans = 1;
+                        if crec.flags & F_NEG != 0 {
+                            log_query(caches, crec.flags, &name, None);
+                            auth = 0;
+                            if crec.flags & F_NXDOMAIN != 0 {
+                                nxdomain = 1;
+                            }
+                        } else {
+                            if (crec.flags & (F_HOSTS | F_DHCP)) == 0 {
+                                auth = 0;
+                            }
+                            log_query(caches, crec.flags & !F_REVERSE, &name, Some(&addr));
+
+                            put_short((nameoffset as u16) | 0xc000, &mut ansp_copy);
+                            put_short(T_A, &mut ansp_copy);
+                            put_short(C_IN, &mut ansp_copy);
+                            put_long(ttl as u32, &mut ansp_copy);
+
+                            if let AllAddr::Addr4(ipv4) = crec.addr {
+                                let ipv4_bytes = ipv4.octets();
+                                ansp_copy.extend_from_slice(&ipv4_bytes);
+                                anscount += 1;
+                            }
+
+                            if limit.len() < ansp_copy.len() {
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            }
+            if addr.len() > 4 {
+                if qtype == T_AAAA || qtype == T_ANY {
+                    if (options & OPT_FILTER) != 0 && qtype == T_ANY && name_str.contains('_') {
+                        ans = 1;
+                    } else {
+                        crecp = None;
+                        while let Some(crec) = cache_find_by_name(
+                            caches,
+                            crecp.clone().map(|c| Box::into_raw(c)),
+                            &name_str,
+                            now,
+                            F_IPV6,
+                        ) {
+                            let ttl = if (unsafe { &*crec }).flags & (F_IMMORTAL | F_DHCP) != 0 {
+                                local_ttl
+                            } else {
+                                match (unsafe { &*crec }).ttd.duration_since(now) {
+                                    Ok(duration) => duration.as_secs() as u64,
+                                    Err(_) => return 0,
+                                }
+                            };
+
+                            if qtype == T_ANY
+                                && ((unsafe { &*crec }).flags & (F_HOSTS | F_DHCP)) == 0
+                            {
+                                return 0;
+                            }
+
+                            ans = 1;
+
+                            if (unsafe { &*crec }).flags & F_NEG != 0 {
+                                log_query(caches, (unsafe { &*crec }).flags, &name, None);
+                                auth = 0;
+                                if (unsafe { &*crec }).flags & F_NXDOMAIN != 0 {
+                                    nxdomain = 1;
+                                }
+                            } else {
+                                if ((unsafe { &*crec }).flags & (F_HOSTS | F_DHCP)) == 0 {
+                                    auth = 0;
+                                }
+                                log_query(
+                                    caches,
+                                    (unsafe { &*crec }).flags & !F_REVERSE,
+                                    &name,
+                                    Some(&addr),
+                                );
+
+                                put_short((nameoffset as u16) | 0xc000, &mut ansp_copy);
+                                put_short(T_AAAA, &mut ansp_copy);
+                                put_short(C_IN, &mut ansp_copy);
+                                put_long(ttl as u32, &mut ansp_copy);
+
+                                put_short(IN6ADDRSZ, &mut ansp_copy);
+                                if let AllAddr::Addr6(ipv6) = (unsafe { &*crec }).addr {
+                                    let ipv6_bytes = ipv6.octets();
+                                    ansp_copy.extend_from_slice(&ipv6_bytes);
+                                    anscount += 1;
+                                }
+
+                                if limit.len() < ansp_copy.len() {
+                                    return 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if qtype == T_MX || qtype == T_ANY {
+                if let Some(ref mxname) = mxname {
+                    if hostname_isequal(&name_str, mxname) {
+                        ansp_copy = add_text_record(
+                            nameoffset.try_into().unwrap(),
+                            &mut ansp_copy,
+                            local_ttl as u32,
+                            1,
+                            T_MX,
+                            mxtarget.as_deref().unwrap_or(""),
+                        )
+                        .to_vec();
+                        anscount += 1;
+                        ans = 1;
+                    }
+                } else if (options & (OPT_SELFMX | OPT_LOCALMX)) != 0
+                    && cache_find_by_name(caches, None, &name_str, now, F_HOSTS | F_DHCP).is_some()
+                {
+                    let target = if (options & OPT_SELFMX) != 0 {
+                        &name_str
+                    } else {
+                        mxtarget.as_deref().unwrap_or("")
+                    };
+                    ansp_copy = add_text_record(
+                        nameoffset.try_into().unwrap(),
+                        &mut ansp_copy,
+                        local_ttl as u32,
+                        1,
+                        T_MX,
+                        target,
+                    )
+                    .to_vec();
+                    anscount += 1;
+                    ans = 1;
+                }
+                if limit.len() < ansp_copy.len() {
+                    return 0;
+                }
+            }
+
+            if qtype == T_MAILB {
+                ans = 1;
+                nxdomain = 1;
+            }
+
+            if ans == 0 {
+                return 0;
+            }
         }
     }
 
-    ansp_copy.len() as i32
+    if let Some(ref mut header) = header {
+        header.qr = 1; // Response
+        header.aa = auth as u8; // Authoritative - only hosts and DHCP derived names
+        header.ra = 1; // Recursion available
+        header.tc = 0; // No truncation
+
+        if anscount == 0 && nxdomain != 0 {
+            header.rcode = NXDOMAIN;
+        } else {
+            header.rcode = NOERROR; // No error
+        }
+
+        header.ancount = anscount as u16;
+        header.nscount = 0;
+        header.arcount = 0;
+    }
+
+    // 计算返回值，相当于 `return ansp - (unsigned char *)header;` 在C中指针的偏移
+    let return_value =
+        (ansp_copy.len() as isize) - (header_bytes.as_ptr() as isize - limit.as_ptr() as isize);
+    return return_value as i32;
 }
 
 // 判断地址是否为私有网络地址

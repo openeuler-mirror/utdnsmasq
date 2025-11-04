@@ -197,14 +197,14 @@ const CONFILE: &str = "/etc/utdnsmasq.conf";
 pub const OPT_BOGUSPRIV: u32 = 1;
 const OPT_FILTER: u32 = 2;
 const OPT_LOG: u32 = 4;
-const OPT_SELFMX: u32 = 8;
+pub const OPT_SELFMX: u32 = 8;
 const OPT_NO_HOSTS: u32 = 16;
 const OPT_NO_POLL: u32 = 32;
 const OPT_DEBUG: u32 = 64;
 const OPT_ORDER: u32 = 128;
 const OPT_NO_RESOLV: u32 = 256;
 const OPT_EXPAND: u32 = 512;
-const OPT_LOCALMX: u32 = 1024;
+pub const OPT_LOCALMX: u32 = 1024;
 const OPT_NO_NEG: u32 = 2048;
 const OPT_NODOTS_LOCAL: u32 = 4096;
 
