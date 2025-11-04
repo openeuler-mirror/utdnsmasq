@@ -194,7 +194,7 @@ const SERV_FOR_NODOTS: u32 = 32; /* server for names with no domain part only */
 const SERV_TYPE: u32 = (SERV_HAS_DOMAIN | SERV_FOR_NODOTS);
 
 const CONFILE: &str = "/etc/utdnsmasq.conf";
-const OPT_BOGUSPRIV: u32 = 1;
+pub const OPT_BOGUSPRIV: u32 = 1;
 const OPT_FILTER: u32 = 2;
 const OPT_LOG: u32 = 4;
 const OPT_SELFMX: u32 = 8;
