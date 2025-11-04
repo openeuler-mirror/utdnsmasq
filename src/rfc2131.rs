@@ -463,7 +463,7 @@ pub fn dhcp_reply(
         }
     }
 
-    return 0;
+    0
 }
 
 // 处理 DHCP 协议中的各种请求，并生成相应的响应
