@@ -4,16 +4,16 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+use hostname;
+use std::fmt::format;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::process;
 use std::str::FromStr;
 
-// use users::cache;
-
-use crate::die;
 use crate::util::canonicalise;
+use crate::{die, CONFILE};
+
 pub type SaFamilyT = u16;
 pub type InPortT = u16;
 pub type InAddrT = u32;
@@ -173,8 +173,21 @@ pub struct DhcpConfig {
     pub lease_time: u32,
     pub next: Option<Box<DhcpConfig>>,
 }
+impl Default for DhcpConfig {
+    fn default() -> Self {
+        DhcpConfig {
+            clid_len: 0,
+            clid: Vec::new(),
+            hwaddr: [0; ETHER_ADDR_LEN],
+            hostname: None,
+            addr: Ipv4Addr::new(0, 0, 0, 0),
+            lease_time: DEFLEASE,
+            next: None,
+        }
+    }
+}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DhcpOpt {
     pub opt: u8,
     pub len: u8,
@@ -182,6 +195,9 @@ pub struct DhcpOpt {
     pub next: Option<Box<DhcpOpt>>,
 }
 
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+const NAMESERVER_PORT: u16 = 53;
 // 定义为32位  最多4,294,967,295s 约49,710天
 const DEFLEASE: u32 = 3600; /* default lease time, 1 hour */
 
@@ -193,7 +209,6 @@ const SERV_HAS_DOMAIN: u32 = 16; /* server for one domain only */
 const SERV_FOR_NODOTS: u32 = 32; /* server for names with no domain part only */
 const SERV_TYPE: u32 = (SERV_HAS_DOMAIN | SERV_FOR_NODOTS);
 
-const CONFILE: &str = "/etc/utdnsmasq.conf";
 pub const OPT_BOGUSPRIV: u32 = 1;
 const OPT_FILTER: u32 = 2;
 const OPT_LOG: u32 = 4;
@@ -208,27 +223,72 @@ pub const OPT_LOCALMX: u32 = 1024;
 const OPT_NO_NEG: u32 = 2048;
 const OPT_NODOTS_LOCAL: u32 = 4096;
 
-const OPTMAP: [&str; 15] = [
-    "bogus-priv",
-    "filterwin2k",
-    "log-queries",
-    "selfmx",
-    "no-hosts",
-    "no-poll",
-    "no-daemon",
-    "strict-order",
-    "no-resolv",
-    "expand-hosts",
-    "localmx",
-    "no-negcache",
-    "domain-needed",
-    "help",
-    "version",
+struct Optflags<'a> {
+    pub c: &'a str,
+    pub flag: u32,
+}
+
+const OPTMAP: [Optflags; 15] = [
+    (Optflags {
+        c: "bogus-priv",
+        flag: OPT_BOGUSPRIV,
+    }),
+    (Optflags {
+        c: "filterwin2k",
+        flag: OPT_FILTER,
+    }),
+    (Optflags {
+        c: "log-queries",
+        flag: OPT_LOG,
+    }),
+    (Optflags {
+        c: "selfmx",
+        flag: OPT_SELFMX,
+    }),
+    (Optflags {
+        c: "no-hosts",
+        flag: OPT_NO_HOSTS,
+    }),
+    (Optflags {
+        c: "no-poll",
+        flag: OPT_NO_POLL,
+    }),
+    (Optflags {
+        c: "no-daemon",
+        flag: OPT_DEBUG,
+    }),
+    (Optflags {
+        c: "strict-order",
+        flag: OPT_ORDER,
+    }),
+    (Optflags {
+        c: "no-resolv",
+        flag: OPT_NO_RESOLV,
+    }),
+    (Optflags {
+        c: "expand-hosts",
+        flag: OPT_EXPAND,
+    }),
+    (Optflags {
+        c: "localmx",
+        flag: OPT_LOCALMX,
+    }),
+    (Optflags {
+        c: "no-negcache",
+        flag: OPT_NO_NEG,
+    }),
+    (Optflags {
+        c: "domain-needed",
+        flag: OPT_NODOTS_LOCAL,
+    }),
+    (Optflags { c: "help", flag: 0 }),
+    (Optflags {
+        c: "version",
+        flag: 0,
+    }),
 ];
 
 pub fn read_opts(
-    argc: usize,
-    argv: Vec<String>,
     buff: &mut [u8],
     resolv_files: &mut Option<Box<ResolvC>>,
     mxname: &mut Option<String>,
@@ -242,22 +302,28 @@ pub fn read_opts(
     if_addrs: &mut Option<Box<Iname>>,
     if_except: &mut Option<Box<Iname>>,
     bogus_addr: &mut Option<Box<BogusAddr>>,
-    serv_addrs: &Option<Box<Server>>,
+    serv_addrs: &mut Option<Box<Server>>,
     cachesize: &mut usize,
     port: &mut u16,
     query_port: &mut i32,
     local_ttl: &mut u64,
     addn_hosts: &mut Option<String>,
     dhcp: &mut Option<Box<DhcpContext>>,
-    dhcp_conf: &Option<Box<DhcpConfig>>,
-    opts: &Option<Box<DhcpOpt>>,
-    dhcp_file: &Option<String>,
-    dhcp_sname: &Option<String>,
-    dhcp_next_server: Ipv4Addr,
+    dhcp_conf: &mut Option<Box<DhcpConfig>>,
+    dhcp_opts: &mut Option<Box<DhcpOpt>>,
+    dhcp_file: &mut Option<String>,
+    dhcp_sname: &mut Option<String>,
+    dhcp_next_server: &mut Ipv4Addr,
 ) -> u32 {
     let mut flags: u32 = 0;
     let mut conffile: &str = CONFILE;
     let mut conffile_set: bool = false;
+    let mut option_flag: &str = "";
+
+    let c_collection: Vec<&'static str> = OPTMAP
+        .iter()
+        .map(|optflags| optflags.c) // 提取每个 Optflags 结构体的 c 字段
+        .collect();
 
     /* 打开配置文件 */
     let file = File::open(conffile);
@@ -265,7 +331,8 @@ pub fn read_opts(
         Ok(file) => Some(file),
         Err(error) => {
             if conffile_set {
-                println!("cannot read the config file {}", conffile);
+                let str = format!("cannot read the config file {}", conffile);
+                die(&str, "");
             } else {
                 println!("{:?}", error);
                 return 0;
@@ -284,22 +351,30 @@ pub fn read_opts(
         }
 
         /* 去除注释、空格、等多余字符 */
-        let re = regex::Regex::new(r"[#| |\t]").unwrap();
+        let re = regex::Regex::new(r"[ |\t]").unwrap();
         let line_vec: Vec<&str> = re.split(&line).filter(|s| !s.is_empty()).collect();
         let line_val = line_vec[0];
 
         /* 获取option 和 value */
-        let (mut option, optarg) = if line_val.contains('=') {
+        let (mut option, mut optarg) = if line_val.contains('=') {
             let val: Vec<&str> = line_val.split('=').collect();
             (val[0], val[1])
         } else {
             (line_val, "")
         };
 
-        /* 配置文件缺少参数 */
-        if !OPTMAP.contains(&option) && optarg.is_empty() {
-            println!("missing parameter for {} in config file.", option);
-            process::exit(1);
+        /* 配置项缺少参数 */
+        if !c_collection.contains(&option) {
+            if optarg.is_empty() {
+                let string = format!("missing parameter for {} in config file.", option);
+                die(&string, "");
+            }
+        } else {
+            // 配置项参数多余
+            if !optarg.is_empty() {
+                let string = format!("extraneous parameter for {} in config file.", option);
+                die(&string, "");
+            }
         }
 
         match option {
@@ -338,7 +413,7 @@ pub fn read_opts(
             // m
             "mx-host" => {
                 if canonicalise(optarg).is_none() {
-                    option = "?";
+                    option_flag = "?";
                 } else {
                     *mxname = Some(optarg.to_string());
                 }
@@ -357,7 +432,7 @@ pub fn read_opts(
             // t
             "mx-target" => {
                 if canonicalise(optarg).is_none() {
-                    option = "?";
+                    option_flag = "?";
                 } else {
                     *mxtarget = Some(optarg.to_string());
                 }
@@ -369,7 +444,7 @@ pub fn read_opts(
             // H
             "addn-hosts" => {
                 if addn_hosts.is_some() {
-                    option = "?";
+                    option_flag = "?";
                 } else {
                     *addn_hosts = Some(optarg.to_string());
                 }
@@ -378,7 +453,7 @@ pub fn read_opts(
             // s
             "domain" => {
                 if canonicalise(optarg).is_none() {
-                    option = "?";
+                    option_flag = "?";
                 } else {
                     *domain_suffix = Some(optarg.to_string());
                 }
@@ -420,16 +495,18 @@ pub fn read_opts(
             // B
             "bogus-nxdomain" => {
                 let mut addr: InAddr = InAddr { s_addr: 0 }; // 默认值 暂定为0
-                let (ret, in_addr) = inet_addr(&optarg);
-                if ret {
-                    addr.s_addr = in_addr;
-                    let mut baddr: BogusAddr = BogusAddr {
-                        addr: addr,
-                        next: bogus_addr.clone(),
-                    };
-                    *bogus_addr = Some(Box::new(baddr.clone()));
-                } else {
-                    option = "?";
+                let ret = inet_addr(&optarg);
+                match ret {
+                    Some(in_addr) => {
+                        addr.s_addr = in_addr;
+                        let mut baddr: BogusAddr = BogusAddr {
+                            addr: addr,
+                            next: bogus_addr.clone(),
+                        };
+                        *bogus_addr = Some(Box::new(baddr.clone()));
+                    }
+
+                    None => option_flag = "?",
                 }
             }
             // a
@@ -459,33 +536,36 @@ pub fn read_opts(
                                 new.addr.in6.sin6_flowinfo = 0;
                             }
                             _ => {
-                                option = "?";
+                                option_flag = "?";
                             }
                         }
                     }
                     None => {
-                        option = "?";
+                        option_flag = "?";
                     }
                 }
 
                 *if_addrs = Some(Box::new(new.clone()));
             }
 
-            // S A   暂未完成
+            // S A
             "server" | "address" => {
                 let mut serv: Server = Server::default();
                 let mut newlist: Server = Server::default();
 
                 if optarg.starts_with("/") {
-                    let mut end: String = String::new();
-                    let domains: Vec<&str> = optarg.split('/').filter(|s| !s.is_empty()).collect();
+                    let mut end: &str = "";
+                    while optarg.contains("/") {
+                        let ret: Vec<&str> = optarg.splitn(2, "/").collect();
+                        optarg = ret[0];
+                        end = ret[1];
 
-                    for domain in domains {
-                        let domain = canonicalise(domain);
+                        let domain = canonicalise(optarg);
                         if domain.is_none() {
-                            option = "?";
+                            option_flag = "?";
                             break;
                         }
+
                         serv.next = Some(Box::new(newlist.clone()));
                         serv.sfd = None;
                         serv.domain = domain.clone();
@@ -495,10 +575,12 @@ pub fn read_opts(
                             SERV_FOR_NODOTS
                         };
                         newlist = serv.clone();
+
+                        optarg = end;
                     }
 
                     if Some(newlist.clone()).is_none() {
-                        option = "?";
+                        option_flag = "?";
                         break;
                     }
                 } else {
@@ -511,10 +593,137 @@ pub fn read_opts(
                 if option == "address" {
                     newlist.flags |= SERV_LITERAL_ADDRESS;
                     if newlist.flags & SERV_TYPE == 0 {
-                        option = "?";
+                        option_flag = "?";
                         break;
                     }
                 }
+
+                if optarg.is_empty() {
+                    newlist.flags |= SERV_NO_ADDR;
+                    if newlist.flags & SERV_LITERAL_ADDRESS != 0 {
+                        option_flag = "?";
+                    }
+                } else {
+                    let mut source_port: u16 = 0;
+                    let mut serv_port: u16 = NAMESERVER_PORT;
+                    // let mut portno: i32 = 0;
+                    let mut source: &str = "";
+                    // let mut temp: &str = "";
+
+                    if optarg.contains("@") {
+                        let split: Vec<&str> = optarg.split("@").collect();
+                        optarg = split[0];
+                        source = split[1];
+
+                        if source.contains("#") {
+                            let split: Vec<&str> = source.split("#").collect();
+                            source = split[0];
+                            if let Ok(port) = split[1].parse::<u16>() {
+                                source_port = port;
+                                // println!("port: {}", port);
+                            } else {
+                                option_flag = "?";
+                            }
+                        }
+                    }
+
+                    if optarg.contains("#") {
+                        let split: Vec<&str> = optarg.split("#").collect();
+                        optarg = split[0];
+
+                        if let Ok(port) = split[1].parse::<u16>() {
+                            serv_port = port;
+                        } else {
+                            option_flag = "?";
+                        }
+                    }
+
+                    let ipaddr = inet_pton(&optarg);
+                    match ipaddr {
+                        Some(ip) => {
+                            match ip {
+                                IpAddr::V4(ipv4) => {
+                                    // 将 IPv4 地址转换为网络字节序的 u32
+                                    let binary_format = u32::from(ipv4).to_be();
+                                    newlist.addr.in_.sin_addr = InAddr::new(binary_format);
+                                    newlist.addr.in_.sin_port = serv_port.to_be();
+                                    newlist.source_addr.in_.sin_port = source_port.to_be();
+                                    newlist.addr.sa.sa_family = AF_INET;
+                                    newlist.source_addr.sa.sa_family = AF_INET;
+
+                                    if !source.is_empty() {
+                                        let ret = inet_pton(source);
+                                        match ret {
+                                            Some(ip) => match ip {
+                                                IpAddr::V4(ipv4) => {
+                                                    let binary_format = u32::from(ipv4).to_be();
+                                                    newlist.source_addr.in_.sin_addr =
+                                                        InAddr::new(binary_format);
+                                                    newlist.flags |= SERV_HAS_SOURCE;
+                                                }
+                                                _ => option_flag = "?",
+                                            },
+                                            None => {}
+                                        }
+                                    } else {
+                                        newlist.source_addr.in_.sin_addr.s_addr = 0;
+                                        // INADDR_ANY
+                                    }
+                                }
+                                IpAddr::V6(ipv6) => {
+                                    let binary_format = ipv6.octets();
+                                    newlist.addr.in6.sin6_addr = In6Addr::new(binary_format);
+
+                                    newlist.addr.in6.sin6_port = serv_port.to_be();
+                                    newlist.source_addr.in6.sin6_port = source_port.to_be();
+                                    newlist.addr.sa.sa_family = AF_INET6;
+                                    newlist.source_addr.sa.sa_family = AF_INET6;
+                                    newlist.addr.in6.sin6_flowinfo = 0;
+                                    newlist.source_addr.in6.sin6_flowinfo = 0;
+
+                                    if !source.is_empty() {
+                                        let ret = inet_pton(source);
+                                        match ret {
+                                            Some(ip) => match ip {
+                                                IpAddr::V6(ipv6) => {
+                                                    let binary_format = ipv6.octets();
+                                                    newlist.source_addr.in6.sin6_addr =
+                                                        In6Addr::new(binary_format);
+                                                    newlist.flags |= SERV_HAS_SOURCE;
+                                                }
+                                                _ => option_flag = "?",
+                                            },
+                                            None => {}
+                                        }
+                                    } else {
+                                        newlist.source_addr.in6.sin6_addr = In6Addr::new([0; 16]);
+                                        // in6addr_any
+                                    }
+                                }
+                                _ => {
+                                    option_flag = "?";
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+
+                serv = newlist.clone();
+                while serv.next.is_some() {
+                    match serv.next {
+                        Some(ref mut next) => {
+                            next.flags = serv.flags;
+                            next.addr = serv.addr;
+                            next.source_addr = serv.source_addr;
+                            serv = *next.clone();
+                        }
+                        None => {}
+                    }
+                }
+
+                serv.next = serv_addrs.take();
+                *serv_addrs = Some(Box::new(newlist.clone()));
             }
 
             // p
@@ -561,7 +770,6 @@ pub fn read_opts(
 
             // F
             "dhcp-range" => {
-                let mut comma: String = String::new();
                 let mut new: DhcpContext = DhcpContext::default();
 
                 // 将dhcp值赋值给new.next 并将dhcp置为空
@@ -583,7 +791,7 @@ pub fn read_opts(
                             new.start = ip;
                         }
                         Err(_) => {
-                            option = "?";
+                            option_flag = "?";
                         }
                     }
 
@@ -593,7 +801,7 @@ pub fn read_opts(
                             new.end = ip;
                         }
                         Err(_) => {
-                            option = "?";
+                            option_flag = "?";
                         }
                     }
 
@@ -629,38 +837,279 @@ pub fn read_opts(
                     new.last = new.start;
                     new.iface = String::from("");
                 } else {
-                    option = "?";
+                    option_flag = "?";
                 }
 
                 *dhcp = Some(Box::new(new.clone()));
             }
 
-            _ => {
-                println!("bad argument for option {}", option);
+            // G
+            "dhcp-host" => {
+                let mut new: DhcpConfig = DhcpConfig::default();
+
+                new.next = dhcp_conf.clone();
+
+                // ","分割参数
+                let a: Vec<&str> = optarg.split(',').collect();
+
+                // 遍历参数
+                for temp in a {
+                    if temp.contains(":") {
+                        let mut args: Vec<&str> = temp.split(":").collect();
+                        // arg[0] 属于["id", "ID", "iD", "Id"]中的一个
+                        if ["id", "ID", "iD", "Id"]
+                            .iter()
+                            .any(|&x| args[0].contains(x))
+                        {
+                            args = args[1..].to_owned();
+                            // 剩余的参数长度大于1  是id：1a:2b:3c:4d类型的id
+                            if args.len() > 1 {
+                                for arg in args {
+                                    new.clid.push(u32::from_str_radix(arg, 16).unwrap() as u8);
+                                }
+                            } else {
+                                // id:marjorie 类型id
+                                new.clid = args[0].to_owned().into();
+                            }
+                            new.clid_len = new.clid.len();
+                        } else if args.len() == 6 {
+                            // mac地址
+                            new.hwaddr[0] = u32::from_str_radix(args[0], 16).unwrap() as u8;
+                            new.hwaddr[1] = u32::from_str_radix(args[1], 16).unwrap() as u8;
+                            new.hwaddr[2] = u32::from_str_radix(args[2], 16).unwrap() as u8;
+                            new.hwaddr[3] = u32::from_str_radix(args[3], 16).unwrap() as u8;
+                            new.hwaddr[4] = u32::from_str_radix(args[4], 16).unwrap() as u8;
+                            new.hwaddr[5] = u32::from_str_radix(args[5], 16).unwrap() as u8;
+                        } else {
+                            option_flag = "?";
+                        }
+                    } else if temp.contains(".") {
+                        // ip地址
+                        match Ipv4Addr::from_str(temp) {
+                            Ok(ip) => {
+                                new.addr = ip;
+                            }
+                            Err(_) => {
+                                println!("ip parse error");
+                            }
+                        }
+                    } else {
+                        // 租约时间
+                        let last: Option<char>;
+                        let mut fac: u32 = 1;
+
+                        if temp.len() > 1 {
+                            last = temp.chars().last();
+                            match last {
+                                Some('h') | Some('H') => fac *= 60 * 60,
+                                Some('m') | Some('M') => fac *= 60,
+                                _ => {}
+                            }
+
+                            match is_decimal::<u32>(&temp[..temp.len() - 1]) {
+                                Some(num) => {
+                                    new.lease_time = num * fac;
+                                }
+                                None => {
+                                    // 不是数字
+                                    if temp == "infinite" {
+                                        new.lease_time = 0xffffffff;
+                                    } else {
+                                        // 不是时间 设置主机名
+                                        new.hostname = Some(temp.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                *dhcp_conf = Some(Box::new(new.clone()));
             }
+
+            // O
+            "dhcp-option" => {
+                let mut new: DhcpOpt = DhcpOpt::default();
+                let mut cp: &str = "";
+                let mut comma: &str = "";
+                let mut addrs: i32 = 0;
+
+                new.next = dhcp_opts.clone();
+
+                if let Some((first, rest)) = optarg.split_once(',') {
+                    match is_decimal::<u8>(first) {
+                        Some(num) => {
+                            new.opt = num;
+                        }
+                        None => option_flag = "?",
+                    }
+                    comma = rest;
+                } else {
+                    comma = "";
+                }
+
+                if comma.is_empty() {
+                    option_flag = "?";
+                }
+
+                // 检查非地址列表字符
+                let mut text_flag: bool = false;
+                let rests: Vec<&str> = comma.split(",").collect();
+                for rest in rests {
+                    for char in rest.chars() {
+                        if is_valid_char(char) {
+                            continue;
+                        } else {
+                            text_flag = true;
+                            break;
+                        }
+                    }
+                }
+
+                // 文本
+                if text_flag {
+                    new.len = comma.len() as u8;
+                    new.val = comma.to_owned().into();
+                } else {
+                    // 地址
+                    let ip_addrs: Vec<&str> = comma.split(",").collect();
+                    for ip_addr in ip_addrs {
+                        match inet_addr(ip_addr) {
+                            Some(ip) => {
+                                // 地址解析出的数据有可能是反向的，需要进一步验证
+                                // 小端续
+                                let temp = ip.to_le_bytes();
+                                // 大端序
+                                // let temp = ip.to_be_bytes();
+                                for i in 0..4 {
+                                    new.val.push(temp[i]); // 添加ip地址
+                                }
+                            }
+                            None => {
+                                option_flag = "?";
+                            }
+                        }
+                    }
+                    new.len = new.val.len() as u8;
+                }
+
+                *dhcp_opts = Some(Box::new(new.clone()));
+            }
+
+            // M
+            "dhcp-boot" => {
+                let mut comma: &str = "";
+
+                if let Some((first, rest)) = optarg.split_once(',') {
+                    *dhcp_file = Some(first.to_string());
+                    comma = rest;
+                } else {
+                    comma = "";
+                }
+                // comma非空
+                if !comma.is_empty() {
+                    if let Some((first, rest)) = comma.split_once(',') {
+                        *dhcp_sname = Some(first.to_string());
+                        comma = rest;
+                    } else {
+                        comma = "";
+                    }
+
+                    if !comma.is_empty() {
+                        match Ipv4Addr::from_str(comma) {
+                            Ok(ip) => {
+                                *dhcp_next_server = ip;
+                            }
+                            Err(_) => {
+                                option_flag = "?";
+                            }
+                        }
+                    }
+                }
+            }
+
+            _ => {}
         }
 
-        // if option == "?" {
-        //     die!("bad argument for option {:#?}", buff);
-        // }
+        if option_flag == "?" {
+            let string = format!("bad argument for option {}", option);
+            die(&string, "");
+        }
     }
 
-    0
+    /* port might no be known when the address is parsed - fill in here */
+    if serv_addrs.clone().is_some() {
+        let mut tmp = serv_addrs.as_mut();
+
+        while let Some(current) = tmp {
+            unsafe {
+                if current.flags & SERV_HAS_SOURCE == 0 {
+                    if current.addr.sa.sa_family == AF_INET as u16 {
+                        current.source_addr.in_.sin_port = query_port.to_be() as u16;
+                    } else if current.addr.sa.sa_family == AF_INET6 as u16 {
+                        current.source_addr.in6.sin6_port = query_port.to_be() as u16;
+                    }
+                }
+            }
+            tmp = current.next.as_mut();
+        }
+    }
+
+    if if_addrs.clone().is_some() {
+        let mut tmp = if_addrs.as_mut();
+
+        while let Some(current) = tmp {
+            unsafe {
+                if current.addr.sa.sa_family == AF_INET as u16 {
+                    current.addr.in_.sin_port = port.to_be();
+                } else if current.addr.sa.sa_family == AF_INET6 as u16 {
+                    current.addr.in6.sin6_port = port.to_be();
+                }
+            }
+            tmp = current.next.as_mut();
+        }
+    }
+
+    if flags & OPT_LOCALMX != 0 || mxname.is_some() || mxtarget.is_some() {
+        match hostname::get() {
+            Ok(hostname) => {
+                println!("hostname: {}", hostname.to_string_lossy());
+                if mxname.is_none() {
+                    *mxname = Some(hostname.to_string_lossy().into_owned());
+                }
+                if mxtarget.is_none() {
+                    *mxtarget = Some(hostname.to_string_lossy().into_owned());
+                }
+            }
+            Err(_) => {
+                die("can't get hostname", "");
+            }
+        }
+    }
+
+    // 无resolv文件
+    if flags & OPT_NO_RESOLV != 0 {
+        *resolv_files = None;
+    } else if resolv_files.clone().is_some() {
+        // 禁止轮询
+        if let Some(temp) = resolv_files {
+            if temp.next.is_some() && flags & OPT_NO_POLL != 0 {
+                die("only one resolv.conf file allowed in no-poll mode.", "");
+            }
+        }
+    }
+
+    flags
 }
 
 // 将点分十进制转换为u32类型   成功返回true，失败返回false
-fn inet_addr(ip_str: &str) -> (bool, u32) {
-    // 将点分十进制形式的 IP 地址字符串转换为 Ipv4Addr 类型
-    let ip_addr: Ipv4Addr = match Ipv4Addr::from_str(ip_str) {
-        Ok(addr) => addr,
-        Err(_) => return (false, 0),
-    };
-
-    // 获取网络字节序表示的IP地址
-    let network_byte_order: u32 = u32::from(ip_addr).to_be();
-    (true, network_byte_order)
+fn inet_addr(ip_str: &str) -> Option<u32> {
+    match Ipv4Addr::from_str(ip_str) {
+        Ok(ip) => Some(u32::from(ip).to_be()),
+        Err(_) => None,
+    }
 }
-
+// 点分十进制 转成IP地址
 fn inet_pton(ip_str: &str) -> Option<IpAddr> {
     if let Ok(ipv4_addr) = ip_str.parse::<Ipv4Addr>() {
         return Some(IpAddr::V4(ipv4_addr));
@@ -671,4 +1120,16 @@ fn inet_pton(ip_str: &str) -> Option<IpAddr> {
     }
 
     None
+}
+
+// 判断是否能转换为数字
+fn is_decimal<T: std::str::FromStr>(s: &str) -> Option<T> {
+    match s.parse::<T>() {
+        Ok(num) => Some(num),
+        Err(_) => None,
+    }
+}
+
+fn is_valid_char(c: char) -> bool {
+    c == '.' || c.is_whitespace() || c.is_ascii_digit()
 }

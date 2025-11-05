@@ -164,6 +164,7 @@ const VERSION: &str = "2.0";
 const OPT_NO_POLL: u32 = 32;
 const OPT_LOG: u32 = 4;
 const F_QUERY: u32 = 8192;
+const CONFILE: &str = "/etc/utdnsmasq.conf";
 
 // 存储接口名称和地址
 #[derive(Clone)]
@@ -174,7 +175,7 @@ pub struct Irec {
     pub next: Option<Box<Irec>>,
 }
 
-fn start(argc: usize, args: Vec<String>) -> usize {
+fn main() {
     /*
        主函数，用于启动 dnsmasq 服务器
        参数：argc: 命令行参数个数
@@ -211,13 +212,16 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     let mut bogus_addr: Option<Box<BogusAddr>> = None;
     let mut dhcp_sname: Option<String> = None;
     let mut dhcp_file: Option<String> = Default::default();
-    let serv_addrs: Option<Box<Server>> = None;
+    let mut serv_addrs: Option<Box<Server>> = None;
     let mut dnamebuff = vec![0u8; MAXDNAME];
     let mut packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
-    let dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
+    let mut dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
     let leasefd: i32 = 0;
     let serverfdp: Option<Box<ServerFd>> = None;
     let mut sfds: Option<Box<ServerFd>> = None;
+
+    // 初始化日志
+    log_init();
 
     // 创建并初始化 SigSet，用于阻塞信号
     let mut sigset = SigSet::empty();
@@ -245,8 +249,6 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     signal::sigprocmask(SigmaskHow::SIG_BLOCK, Some(&sigset), None).expect("无法阻塞信号");
 
     let options = read_opts(
-        argc,
-        args,
         &mut dnamebuff,
         &mut resolv,
         &mut mxname,
@@ -260,7 +262,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         &mut if_addrs,
         &mut if_except,
         &mut bogus_addr,
-        &serv_addrs,
+        &mut serv_addrs,
         &mut cachesize,
         &mut port,
         &mut query_port,
@@ -271,7 +273,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         &mut dhcp_opts,
         &mut dhcp_file,
         &mut dhcp_sname,
-        dhcp_next_server,
+        &mut dhcp_next_server,
     );
 
     if lease_file.is_none() {
@@ -301,7 +303,8 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     );
     if int_err_string.is_err() {
         complain("********* FAILED to start up", "");
-        return 1;
+        // return 1;
+        die("", "");
     }
 
     let mut if_tmp = &if_names;
@@ -332,7 +335,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
     forward_init(true);
     let mut caches = Cache::new(cachesize, options & 4);
     // 检查DHCP配置并验证必要的文件是否存在
-    if dhcp.is_none() {
+    if dhcp.is_some() {
         let packet_path = IFPACKET;
         let bpf_path = IFBPF;
         if file_exists(packet_path) && file_exists(bpf_path) {
@@ -344,13 +347,12 @@ fn start(argc: usize, args: Vec<String>) -> usize {
                     let mut leasefd = lease_init(
                         lease_file.as_ref().map(|s| s.as_str()),
                         domain_suffix.clone(),
-                        dnamebuff,
-                        packet,
+                        dnamebuff.clone(),
+                        packet.clone(),
                         SystemTime::now(),
                         &mut dhcp_conf,
                     );
                     let _ = lease_update_dns(&mut caches, 1);
-                    return 1;
                 }
 
                 // 移动到下一个节点
@@ -940,7 +942,7 @@ fn start(argc: usize, args: Vec<String>) -> usize {
         }
     }
 
-    0
+    exit(0);
 }
 
 fn daemonize() {
@@ -978,27 +980,27 @@ fn file_exists<P: AsRef<Path>>(path: P) -> bool {
         .any(|entry| entry.file_name() == file_name)
 }
 
-fn main() {
-    // 创建一个 Vec<String> 类型的向量 args
-    let mut args: Vec<String> = Vec::new();
+// fn main() {
+//     // 创建一个 Vec<String> 类型的向量 args
+//     let mut args: Vec<String> = Vec::new();
 
-    // 初始化日志
-    log_init();
+//     // 初始化日志
+//     log_init();
 
-    // 遍历 std::env::args() 获取所有命令行参数
-    for arg in env::args() {
-        // 获取原始指针，并存储到 args 向量中
-        args.push(arg);
-    }
+//     // 遍历 std::env::args() 获取所有命令行参数
+//     for arg in env::args() {
+//         // 获取原始指针，并存储到 args 向量中
+//         args.push(arg);
+//     }
 
-    // 参数数量（减一：去掉程序名）
-    let argc = args.len() - 1;
+//     // 参数数量（减一：去掉程序名）
+//     let argc = args.len() - 1;
 
-    //日志功能示例
-    syslog!(LOG_INFO, "argc: {}", argc);
+//     //日志功能示例
+//     syslog!(LOG_INFO, "argc: {}", argc);
 
-    // 调用 start 函数，传入参数数量和参数指针数组
-    let exit_code = start(argc, args);
+//     // 调用 start 函数，传入参数数量和参数指针数组
+//     let exit_code = start(argc, args);
 
-    exit(exit_code.try_into().unwrap());
-}
+//     exit(exit_code.try_into().unwrap());
+// }
