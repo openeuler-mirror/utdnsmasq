@@ -203,11 +203,11 @@ const DEFLEASE: u32 = 3600; /* default lease time, 1 hour */
 
 const SERV_FROM_RESOLV: u32 = 1; /* 1 for servers from resolv, 0 for command line. */
 const SERV_NO_ADDR: u32 = 2; /* no server, this domain is local only */
-const SERV_LITERAL_ADDRESS: u32 = 4; /* addr is the answer, not the server */
-const SERV_HAS_SOURCE: u32 = 8; /* source address specified */
-const SERV_HAS_DOMAIN: u32 = 16; /* server for one domain only */
-const SERV_FOR_NODOTS: u32 = 32; /* server for names with no domain part only */
-const SERV_TYPE: u32 = (SERV_HAS_DOMAIN | SERV_FOR_NODOTS);
+pub const SERV_LITERAL_ADDRESS: u32 = 4; /* addr is the answer, not the server */
+pub const SERV_HAS_SOURCE: u32 = 8; /* source address specified */
+pub const SERV_HAS_DOMAIN: u32 = 16; /* server for one domain only */
+pub const SERV_FOR_NODOTS: u32 = 32; /* server for names with no domain part only */
+const SERV_TYPE: u32 = SERV_HAS_DOMAIN | SERV_FOR_NODOTS;
 
 pub const OPT_BOGUSPRIV: u32 = 1;
 const OPT_FILTER: u32 = 2;
@@ -216,12 +216,12 @@ pub const OPT_SELFMX: u32 = 8;
 const OPT_NO_HOSTS: u32 = 16;
 const OPT_NO_POLL: u32 = 32;
 const OPT_DEBUG: u32 = 64;
-const OPT_ORDER: u32 = 128;
+pub const OPT_ORDER: u32 = 128;
 const OPT_NO_RESOLV: u32 = 256;
 const OPT_EXPAND: u32 = 512;
 pub const OPT_LOCALMX: u32 = 1024;
 const OPT_NO_NEG: u32 = 2048;
-const OPT_NODOTS_LOCAL: u32 = 4096;
+pub const OPT_NODOTS_LOCAL: u32 = 4096;
 
 struct Optflags<'a> {
     pub c: &'a str,
