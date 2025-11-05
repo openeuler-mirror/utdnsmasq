@@ -822,123 +822,128 @@ fn main() {
 
         let mut iface_opt = interfaces.as_mut();
         // 遍历接口链表，处理接收到的数据包
-        while let Some(iface) = iface_opt {
-            // 将 UDP 套接字转换为 mio 兼容的类型并注册到 Poll 中
-            let mut udp_socket = unsafe { MioUdpSocket::from_raw_fd(iface.fd) };
-            // 使用标准的 Registry 注册 UDP 套接字
-            poll.registry()
-                .register(&mut udp_socket, Token(0), Interest::READABLE);
-            // 轮询事件，等待数据包的到来
-            poll.poll(&mut events, None);
-            // 遍历所有事件
-            for event in events.iter() {
-                if event.token() == Token(0) {
-                    // 接收到数据包，读取数据
-                    let mut packet = [0u8; 512];
-                    let (n, src_addr) = match udp_socket.recv_from(&mut packet) {
-                        Ok((n, addr)) => (n, addr),
-                        Err(_) => {
-                            continue;
-                        }
-                    };
-
-                    // 初始化 udpaddr 结构体，用于存储源地址
-                    unsafe {
-                        let mut udpaddr = MySockAddr {
-                            sa: SockAddr {
-                                sa_family: iface.addr.sa.sa_family,
-                                sa_data: [0; 14],
-                            },
+        unsafe {
+            while let Some(iface) = iface_opt {
+                let mut udpaddr = MySockAddr {
+                    sa: SockAddr {
+                        sa_family: iface.addr.sa.sa_family,
+                        sa_data: [0; 14],
+                    },
+                };
+                // 将 UDP 套接字转换为 mio 兼容的类型并注册到 Poll 中
+                let mut udp_socket = unsafe { MioUdpSocket::from_raw_fd(iface.fd) };
+                // 使用标准的 Registry 注册 UDP 套接字
+                poll.registry()
+                    .register(&mut udp_socket, Token(0), Interest::READABLE);
+                // 轮询事件，等待数据包的到来
+                poll.poll(&mut events, None);
+                // 遍历所有事件
+                for event in events.iter() {
+                    if event.token() == Token(0) {
+                        // 接收到数据包，读取数据
+                        let mut packet = [0u8; 512];
+                        let (n, src_addr) = match udp_socket.recv_from(&mut packet) {
+                            Ok((n, addr)) => (n, addr),
+                            Err(_) => {
+                                continue;
+                            }
                         };
 
-                        // 根据接收到的地址类型（IPv4 或 IPv6），设置 udpaddr
-                        match src_addr {
-                            SocketAddr::V4(addr) => {
-                                udpaddr = MySockAddr {
-                                    in_: SockAddrIn {
-                                        sin_family: AF_INET as SaFamilyT,
-                                        sin_port: addr.port(),
-                                        sin_addr: InAddr {
-                                            s_addr: u32::from(*addr.ip()),
+                        // 初始化 udpaddr 结构体，用于存储源地址
+                        unsafe {
+                            // 根据接收到的地址类型（IPv4 或 IPv6），设置 udpaddr
+                            match src_addr {
+                                SocketAddr::V4(addr) => {
+                                    udpaddr = MySockAddr {
+                                        in_: SockAddrIn {
+                                            sin_family: AF_INET as SaFamilyT,
+                                            sin_port: addr.port(),
+                                            sin_addr: InAddr {
+                                                s_addr: u32::from(*addr.ip()),
+                                            },
+                                            sin_zero: [0; 8],
                                         },
-                                        sin_zero: [0; 8],
-                                    },
-                                };
-                                // 记录查询日志，IPv4
-                                log_query(
-                                    &mut caches,
-                                    F_QUERY | F_IPV4 | F_FORWARD,
-                                    &dnamebuff,
-                                    Some(&udpaddr.in_.sin_addr.s_addr.octets()),
-                                );
-                            }
-                            SocketAddr::V6(addr) => {
-                                udpaddr = MySockAddr {
-                                    in6: SockAddrIn6 {
-                                        sin6_family: AF_INET6 as SaFamilyT,
-                                        sin6_port: addr.port(),
-                                        sin6_flowinfo: 0,
-                                        sin6_addr: In6Addr {
-                                            s6_addr: addr.ip().octets(),
+                                    };
+                                    // 记录查询日志，IPv4
+                                    log_query(
+                                        &mut caches,
+                                        F_QUERY | F_IPV4 | F_FORWARD,
+                                        &dnamebuff,
+                                        Some(&udpaddr.in_.sin_addr.s_addr.octets()),
+                                    );
+                                }
+                                SocketAddr::V6(addr) => {
+                                    udpaddr = MySockAddr {
+                                        in6: SockAddrIn6 {
+                                            sin6_family: AF_INET6 as SaFamilyT,
+                                            sin6_port: addr.port(),
+                                            sin6_flowinfo: 0,
+                                            sin6_addr: In6Addr {
+                                                s6_addr: addr.ip().octets(),
+                                            },
+                                            sin6_scope_id: addr.scope_id(),
                                         },
-                                        sin6_scope_id: addr.scope_id(),
-                                    },
-                                };
-                                // 记录查询日志，IPv6
-                                log_query(
-                                    &mut caches,
-                                    F_QUERY | F_IPV6 | F_FORWARD,
-                                    &dnamebuff,
-                                    Some(&udpaddr.in_.sin_addr.s_addr.octets()),
-                                );
+                                    };
+                                    // 记录查询日志，IPv6
+                                    log_query(
+                                        &mut caches,
+                                        F_QUERY | F_IPV6 | F_FORWARD,
+                                        &dnamebuff,
+                                        Some(&udpaddr.in_.sin_addr.s_addr.octets()),
+                                    );
+                                }
                             }
                         }
-                    }
-                    // 尝试解析数据包的头部
-                    let mut header = Header::from_bytes(&packet[..n]);
-                    if let Some(ref mut header) = header {
-                        if !header.qr == 0 {
-                            // 如果是查询请求，提取请求并处理
-                            if extract_request(&Some(*header), n as u32, &mut dnamebuff) {
-                                let m = answer_request(
-                                    &mut Some(*header),
-                                    &mut packet[..],
-                                    n as u32,
-                                    mxname.clone(),
-                                    mxtarget.clone(),
-                                    options,
-                                    now,
-                                    local_ttl,
-                                    dnamebuff.clone(),
-                                    &mut caches,
-                                );
+                        // 尝试解析数据包的头部
+                        let mut header = Header::from_bytes(&packet[..n]);
+                        if let Some(ref mut header) = header {
+                            if !header.qr == 0 {
+                                // 如果是查询请求，提取请求并处理
+                                if extract_request(
+                                    &Some(*header),
+                                    (n as u32).try_into().unwrap(),
+                                    &mut dnamebuff,
+                                ) {
+                                    let m = answer_request(
+                                        &mut Some(*header),
+                                        &mut packet[..],
+                                        n as u32,
+                                        mxname.clone(),
+                                        mxtarget.clone(),
+                                        options,
+                                        now,
+                                        local_ttl,
+                                        dnamebuff.clone(),
+                                        &mut caches,
+                                    );
 
-                                if m >= 1 {
-                                    // 从缓存回答，发送回复
-                                    udp_socket.send_to(&packet[..m as usize], src_addr);
-                                } else {
-                                    // 无法从缓存中回答，将请求转发给真实的 DNS 服务器
-                                    // last_server = forward_query(
-                                    //     iface.fd,
-                                    //     &udpaddr,
-                                    //     &header,
-                                    //     n as u32,
-                                    //     options,
-                                    //     dnamebuff,
-                                    //     servers,
-                                    //     last_server,
-                                    //     now,
-                                    //     local_ttl,
-                                    // )?;
+                                    if m >= 1 {
+                                        // 从缓存回答，发送回复
+                                        udp_socket.send_to(&packet[..m as usize], src_addr);
+                                    } else {
+                                        // 无法从缓存中回答，将请求转发给真实的 DNS 服务器
+                                        last_server = forward_query(
+                                            iface.fd,
+                                            &udpaddr,
+                                            &mut Some(*header),
+                                            (n as u32).try_into().unwrap(),
+                                            options,
+                                            dnamebuff.clone(),
+                                            servers.clone(),
+                                            last_server,
+                                            now,
+                                            local_ttl,
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // 处理下一个接口
-            iface_opt = iface.next.as_mut();
+                // 处理下一个接口
+                iface_opt = iface.next.as_mut();
+            }
         }
     }
 
