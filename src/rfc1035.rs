@@ -1126,7 +1126,7 @@ pub fn answer_request(
     // 计算返回值，相当于 `return ansp - (unsigned char *)header;` 在C中指针的偏移
     let return_value =
         (ansp_copy.len() as isize) - (header_bytes.as_ptr() as isize - limit.as_ptr() as isize);
-    return return_value as i32;
+    return_value as i32
 }
 
 // 判断地址是否为私有网络地址
