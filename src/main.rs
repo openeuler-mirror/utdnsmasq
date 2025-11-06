@@ -952,7 +952,7 @@ fn main() {
             }
         }
     }
-
+    syslog!(LOG_INFO, "exiting on receipt of SIGTERM",);
     exit(0);
 }
 
