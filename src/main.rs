@@ -5,6 +5,7 @@
  */
 
 pub mod cache;
+pub mod cli;
 pub mod dhcp;
 pub mod forward;
 pub mod lease;
@@ -14,8 +15,10 @@ pub mod option;
 pub mod rfc1035;
 pub mod rfc2131;
 pub mod util;
+
 use byteorder::{ByteOrder, NetworkEndian};
 use cache::*;
+use cli::parse_args;
 use daemonize::Daemonize;
 use dhcp::*;
 use forward::*;
@@ -248,8 +251,11 @@ fn main() {
     // 阻塞信号集中的所有信号，相当于 sigprocmask(SIG_BLOCK, &sigact.sa_mask, &sigmask)
     signal::sigprocmask(SigmaskHow::SIG_BLOCK, Some(&sigset), None).expect("无法阻塞信号");
 
+    // 解析命令行参数
+    parse_args();
+
+    // 解析配置文件
     let options = read_opts(
-        &mut dnamebuff,
         &mut resolv,
         &mut mxname,
         &mut mxtarget,
@@ -984,28 +990,3 @@ fn file_exists<P: AsRef<Path>>(path: P) -> bool {
         .flatten()
         .any(|entry| entry.file_name() == file_name)
 }
-
-// fn main() {
-//     // 创建一个 Vec<String> 类型的向量 args
-//     let mut args: Vec<String> = Vec::new();
-
-//     // 初始化日志
-//     log_init();
-
-//     // 遍历 std::env::args() 获取所有命令行参数
-//     for arg in env::args() {
-//         // 获取原始指针，并存储到 args 向量中
-//         args.push(arg);
-//     }
-
-//     // 参数数量（减一：去掉程序名）
-//     let argc = args.len() - 1;
-
-//     //日志功能示例
-//     syslog!(LOG_INFO, "argc: {}", argc);
-
-//     // 调用 start 函数，传入参数数量和参数指针数组
-//     let exit_code = start(argc, args);
-
-//     exit(exit_code.try_into().unwrap());
-// }
