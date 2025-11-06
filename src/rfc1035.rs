@@ -17,15 +17,15 @@ const F_FORWARD: u32 = 8;
 const F_NEG: u32 = 32;
 const F_NXDOMAIN: u32 = 4096;
 const F_CONFIG: u32 = 2;
-const C_IN: u16 = 1;
+pub const C_IN: u16 = 1;
 const F_REVERSE: u32 = 4;
 const F_IPV6: u32 = 256;
 const NS_INT16SZ: usize = 2;
 const NS_INT32SZ: usize = 4;
 const MAXARPANAME: usize = 75;
 const T_PTR: u16 = 12; // PTR 记录
-const T_A: u16 = 1; // A 记录
-const T_AAAA: u16 = 28; // AAAA 记录
+pub const T_A: u16 = 1; // A 记录
+pub const T_AAAA: u16 = 28; // AAAA 记录
 const T_SOA: u16 = 6; // SOA 记录
 pub const NXDOMAIN: u8 = 3; // NXDOMAIN 响应码
 const T_ANY: u16 = 255;
@@ -38,9 +38,10 @@ const OPT_FILTER: u32 = 2;
 const T_SRV: u16 = 33;
 const T_MX: u16 = 15;
 const T_MAILB: u16 = 253;
+const SERVFAIL: u8 = 2;
+const REFUSED: u8 = 5;
 
 // 检查DNS响应数据包中是否存在虚假的IP地址
-
 pub fn check_for_bogus_wildcard(
     header: &Option<Header>,
     qlen: usize,
@@ -125,7 +126,7 @@ pub fn check_for_bogus_wildcard(
 }
 
 // 从 DNS 数据包中跳过所有问题部分，并返回指向答案部分的切片。
-fn skip_questions(header: &Option<Header>, plen: usize) -> Option<&[u8]> {
+pub fn skip_questions(header: &Option<Header>, plen: usize) -> Option<&[u8]> {
     // 确保 header 存在
     let header = header.as_ref()?;
 
@@ -1290,3 +1291,84 @@ pub fn extract_request(header: &Option<Header>, qlen: u32, name: &mut Vec<u8>) -
 
     false
 }
+
+// pub fn setup_reply(
+//     header: &mut Header,
+//     qlen: usize,
+//     addrp: Option<&[u8]>,
+//     flags: u32,
+//     ttl: u64,
+// ) -> usize {
+//     // 调用 skip_questions 辅助函数
+//     let binding = Some(*header);
+//     let mut p = if let Some(offset) = skip_questions(&binding, qlen) {
+//         offset
+//     } else {
+//         return 0;
+//     };
+
+//     let mut p_vec = p.to_vec();
+//     // 将不可变切片复制到一个可变缓冲区中
+//     let mut p_copy = Vec::from(p);
+
+//     // 初始化回复头部信息
+//     header.qr = 1; // 设置为响应
+//     header.aa = 0; // 非权威回答
+//     header.ra = 1; // 支持递归
+//     header.tc = 0; // 无截断
+//     header.nscount = 0;
+//     header.arcount = 0;
+//     header.ancount = 0; // 初始没有答案，除非后续改变
+
+//     // 根据 flags 设置不同的返回码和响应内容
+//     match flags {
+//         F_NEG => {
+//             header.rcode = SERVFAIL; // 内存获取失败
+//         }
+//         F_NOERR => {
+//             header.rcode = NOERROR; // 空域名
+//         }
+//         F_NXDOMAIN => {
+//             header.rcode = NXDOMAIN; // 域名不存在
+//         }
+//         F_IPV4 if p.len() > 0 => {
+//             if let Some(addr) = addrp {
+//                 if addr.len() == INADDRSZ {
+//                     header.rcode = NOERROR;
+//                     header.ancount = 1;
+//                     header.aa = 1;
+
+//                     // 写入资源记录
+//                     put_short(0xc000 | (std::mem::size_of::<Header>()) as u16, &mut p_copy);
+//                     put_short(T_A, &mut p_copy);
+//                     put_short(C_IN, &mut p_copy);
+//                     put_long(ttl as u32, &mut p_copy); // TTL 只保留低 32 位
+//                     put_short(INADDRSZ as u16, &mut p_copy);
+//                     p_copy.extend_from_slice(addr);
+//                 }
+//             }
+//         }
+//         F_IPV6 if p.len() > 0 => {
+//             if let Some(addr) = addrp {
+//                 if addr.len() == IN6ADDRSZ.into() {
+//                     header.rcode = NOERROR;
+//                     header.ancount = 1;
+//                     header.aa = 1;
+
+//                     // // 写入资源记录
+//                     put_short(0xc000 | (std::mem::size_of::<Header>()) as u16, &mut p_copy);
+//                     put_short(T_AAAA, &mut p_copy);
+//                     put_short(C_IN, &mut p_copy);
+//                     put_long(ttl as u32, &mut p_copy); // TTL 只保留低 32 位
+//                     put_short(IN6ADDRSZ as u16, &mut p_copy);
+//                     p_copy.extend_from_slice(addr);
+//                 }
+//             }
+//         }
+//         _ => {
+//             header.rcode = REFUSED; // 拒绝请求
+//         }
+//     }
+
+//     p_copy.len()
+// }

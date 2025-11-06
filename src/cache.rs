@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::util::*;
+ use crate::util::*;
 use crate::*;
 use std::fs::File;
 use std::io::{self, BufRead};
@@ -29,8 +29,8 @@ pub const F_IPV4: u32 = 4;
 pub const F_IPV6: u32 = 6;
 const OPT_EXPAND: u32 = 1;
 pub const F_NEG: u32 = 32;
-const INADDRSZ: usize = 4;
-const IN6ADDRSZ: usize = 16;
+pub const INADDRSZ: usize = 4;
+pub const IN6ADDRSZ: usize = 16;
 const F_CONFIG: u32 = 0x10;
 const F_UPSTREAM: u32 = 0x40;
 pub const F_NXDOMAIN: u32 = 0x08;
