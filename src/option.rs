@@ -5,6 +5,7 @@
  */
 
 use hostname;
+use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -77,6 +78,11 @@ pub union MySockAddr {
     pub sa: SockAddr,
     pub in_: SockAddrIn,
     pub in6: SockAddrIn6,
+}
+impl fmt::Debug for MySockAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unsafe { write!(f, "MySockAddr {{ sa_family: {} }}", self.sa.sa_family) }
+    }
 }
 
 impl Default for MySockAddr {

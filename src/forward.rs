@@ -7,7 +7,6 @@
 use crate::rfc1035::*;
 use crate::util::*;
 use crate::*;
-use std::os::fd;
 use std::{
     net::{SocketAddr, UdpSocket},
     os::fd::FromRawFd,
@@ -193,7 +192,7 @@ pub unsafe fn forward_query(
         if gotname {
             let namelen = dnamebuff.len();
             let mut matchlen = 0;
-            let mut current_server = servers.as_deref();
+            let current_server = servers.as_deref();
             while let Some(serv) = current_server {
                 // 检查是否为 NODOTS 匹配
                 if (serv.flags & SERV_FOR_NODOTS) != 0
