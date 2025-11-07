@@ -5,6 +5,7 @@
  */
 
 use hostname;
+use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -32,6 +33,12 @@ impl InAddr {
     pub fn new(addr: InAddrT) -> Self {
         InAddr { s_addr: addr }
     }
+
+    pub fn from_ipv4_addr(addr: Ipv4Addr) -> Self {
+        InAddr {
+            s_addr: u32::from(addr).to_be(), // 将 Ipv4Addr 转换为 u32
+        }
+    }
 }
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -42,6 +49,12 @@ pub struct In6Addr {
 impl In6Addr {
     pub fn new(addr: [u8; 16]) -> Self {
         In6Addr { s6_addr: addr }
+    }
+
+    pub fn from_ipv6_addr(addr: Ipv6Addr) -> Self {
+        In6Addr {
+            s6_addr: addr.octets(), // 将 Ipv6Addr 转换为 [u8; 16]
+        }
     }
 }
 
@@ -77,6 +90,11 @@ pub union MySockAddr {
     pub sa: SockAddr,
     pub in_: SockAddrIn,
     pub in6: SockAddrIn6,
+}
+impl fmt::Debug for MySockAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unsafe { write!(f, "MySockAddr {{ sa_family: {} }}", self.sa.sa_family) }
+    }
 }
 
 impl Default for MySockAddr {

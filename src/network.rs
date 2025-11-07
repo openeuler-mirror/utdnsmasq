@@ -6,16 +6,78 @@
 
 use crate::*;
 use forward::*;
-use get_if_addrs::{get_if_addrs, IfAddr, Interface};
-use socket2::{Domain, Protocol, Socket, Type};
-use std::io::{BufRead, BufReader};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
-use std::os::unix::io::AsRawFd; // 用于获取文件描述符
 use util::*;
+// use get_if_addrs::{get_if_addrs, IfAddr, Interface};
+use nix::errno::Errno;
+// use socket2::{Domain, Protocol, Socket, Type};
+use nix::libc::ioctl;
+use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
+use std::io::{BufRead, BufReader};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::os::unix::io::AsRawFd; // 用于获取文件描述符
 
+pub const IFHWADDRLEN: usize = 6;
+pub const IFNAMSIZ: usize = 16;
 const SERV_FROM_RESOLV: u32 = 1; //1 表示从解析器（resolv）获取服务器，0 表示从命令行获取。
 pub const AF_INET: u16 = 2;
 pub const AF_INET6: u16 = 10;
+const IFF_LOOPBACK: i16 = 0x8;
+const IFF_POINTOPOINT: i16 = 0x10;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union IfcIfcu {
+    pub ifcu_buf: *mut u8,    // 缓冲区地址
+    pub ifcu_req: *mut IfReq, // 指向 ifreq 数组的指针
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct IfConf {
+    pub ifc_len: i32,      // 缓冲区大小
+    pub ifc_ifcu: IfcIfcu, // 联合体
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union IfReqName {
+    pub ifrn_name: [u8; IFNAMSIZ], // 接口名称，使用 `u8` 表示字符数组
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union IfReqUnion {
+    pub ifru_addr: SockAddr,          // 地址
+    pub ifru_dstaddr: SockAddr,       // 目的地址
+    pub ifru_broadaddr: SockAddr,     // 广播地址
+    pub ifru_netmask: SockAddr,       // 网络掩码
+    pub ifru_hwaddr: SockAddr,        // 硬件地址
+    pub ifru_flags: i16,              // 标志，使用 `i16` 表示 `short int`
+    pub ifru_ivalue: i32,             // 整型值
+    pub ifru_mtu: i32,                // 最大传输单元
+    pub ifru_map: IfMap,              // 映射
+    pub ifru_slave: [u8; IFNAMSIZ],   // 从设备名称，使用 `u8` 表示字符数组
+    pub ifru_newname: [u8; IFNAMSIZ], // 新设备名称
+    pub ifru_data: *mut u8,           // 数据指针
+}
+
+#[repr(C)]
+#[derive(Clone)]
+pub struct IfReq {
+    pub ifr_ifrn: IfReqName,  // 接口名称或其他字段
+    pub ifr_ifru: IfReqUnion, // 各种用途的联合体
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct IfMap {
+    pub mem_start: u64, // 映射内存起始地址
+    pub mem_end: u64,   // 映射内存结束地址
+    pub base_addr: u16, // 基址
+    pub irq: u8,        // 中断号
+    pub dma: u8,        // DMA 通道
+    pub port: u8,       // I/O 端口
+}
 
 // 添加接口函数
 pub fn add_iface(
@@ -30,53 +92,65 @@ pub fn add_iface(
     let mut tmp: Option<Box<Iname>> = None;
 
     // 检查名称白名单
-    if let Some(mut names_list) = names {
-        while let Some(mut current_name) = names_list.next.take() {
-            if current_name
-                .name
-                .as_ref()
-                .map_or(false, |n| n.as_str() == name)
-            {
-                current_name.found = true; // 直接修改为true
-                tmp = Some(current_name);
-                break;
+    if names.is_some() {
+        tmp = names;
+        while let Some(mut current_name) = tmp.take() {
+            // 使用 take 方法
+            match current_name.name {
+                Some(cur_name) => {
+                    if cur_name == name {
+                        current_name.found = true;
+                        break;
+                    }
+                }
+                _ => {}
             }
-            names_list = current_name;
+            tmp = current_name.next.take();
         }
-        if (flags & 0x8 == 0) && tmp.is_none() {
-            // 0x8代表IFF_LOOPBACK，假设为常量值
+
+        if flags & 0x8 == 0 && tmp.is_some() {
             return None;
         }
     }
+    println!(" aaaaaaaaaaaaaaaaaaaa ");
 
-    // 检查地址白名单
-    if let Some(mut addr_list) = addrs {
-        while let Some(mut current_addr) = addr_list.next.take() {
+    if addrs.is_some() {
+        tmp = addrs;
+        while let Some(mut current_addr) = tmp.take() {
+            // 使用 take 方法
             unsafe {
-                if current_addr.addr.sa == addr.sa {
-                    current_addr.found = true; // 直接修改为true
-                    tmp = Some(current_addr);
-                    break;
-                }
+                println!(
+                    " aaaaaaaaaaaaaaaaaaaa&current_addr.addr{:?} ",
+                    &current_addr.addr.in_.sin_addr.s_addr
+                );
             }
-            addr_list = current_addr;
+            unsafe {
+                println!(" aaaaaaaaaaaaaaaaaaaaaddr{:?} ", addr.in_.sin_addr.s_addr);
+            }
+            if sockaddr_isequal(&current_addr.addr, addr) {
+                current_addr.found = true;
+                println!(" current_addr.found is true");
+                break;
+            }
+            tmp = current_addr.next.take();
         }
+
         if tmp.is_none() {
             return None;
         }
     }
 
     // 检查黑名单
-    if let Some(mut except_list) = except {
-        while let Some(current_except) = except_list.next.take() {
-            if current_except
-                .name
-                .as_ref()
-                .map_or(false, |n| n.as_str() == name)
-            {
-                return None;
+    if except.is_some() {
+        tmp = except;
+        while let Some(mut current) = tmp.take() {
+            // 使用 take 方法
+            if let Some(cur_name) = current.name {
+                if cur_name == name {
+                    return None;
+                }
             }
-            except_list = current_except;
+            tmp = current.next.take();
         }
     }
 
@@ -109,11 +183,187 @@ pub fn add_iface(
     });
 
     *list = Some(new_iface);
-
     None
 }
 
-// 将 `Ipv4Addr` 转换为 `InAddr`
+pub fn enumerate_interfaces(
+    interfacep: &mut Option<Box<Irec>>,
+    names: Option<Box<Iname>>,
+    addrs: Option<Box<Iname>>,
+    except: Option<Box<Iname>>,
+    dhcp: &mut Option<Box<DhcpContext>>,
+    port: u16,
+) -> Result<(), String> {
+    let mut len = 100 * std::mem::size_of::<IfReq>();
+    let fd = match socket(
+        AddressFamily::Inet,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    ) {
+        Ok(fd) => fd,
+        Err(e) => return Err(format!("Failed to create socket: {}", e)),
+    };
+
+    let mut buf: Vec<u8> = vec![0; len];
+    let mut ifc = IfConf {
+        ifc_len: len as i32,
+        ifc_ifcu: IfcIfcu {
+            ifcu_buf: buf.as_mut_ptr(),
+        },
+    };
+
+    let mut lastlen = 0;
+    let mut current_iface = interfacep.as_mut();
+
+    while let Some(iface) = current_iface {
+        iface.valid = false;
+        current_iface = iface.next.as_mut();
+    }
+
+    // 获取接口信息
+    loop {
+        buf = vec![0; len]; // 重新分配缓冲区
+        if buf.len() < len {
+            close(fd).unwrap_or_else(|e| eprintln!("Failed to close socket: {}", e));
+            return Err("Cannot allocate buffer".to_string());
+        }
+        ifc.ifc_ifcu.ifcu_buf = buf.as_mut_ptr(); // 更新缓冲区指针
+        let res = unsafe { ioctl(fd, libc::SIOCGIFCONF, &mut ifc) };
+        if res < 0 {
+            let errno = Errno::last();
+            if errno != Errno::EINVAL || lastlen != 0 {
+                close(fd).unwrap_or_else(|e| eprintln!("Failed to close socket: {}", e));
+                return Err(format!("ioctl error: {}", errno));
+            }
+        } else if ifc.ifc_len == lastlen {
+            break;
+        }
+        lastlen = ifc.ifc_len;
+        len += 10 * std::mem::size_of::<IfReq>();
+    }
+
+    // 遍历获取的接口信息
+    let mut ptr = buf.as_ptr();
+    let end_ptr = unsafe { buf.as_ptr().add(ifc.ifc_len as usize) };
+    while ptr < end_ptr {
+        // 将当前指针转换为 IfReq
+        let ifr = unsafe { &*(ptr as *const IfReq) };
+
+        // 获取接口地址
+        let addr: MySockAddr;
+
+        // 根据 HAVE_SOCKADDR_SA_LEN 的定义计算下一个指针位置
+        #[cfg(feature = "HAVE_SOCKADDR_SA_LEN")]
+        {
+            let sa_len = unsafe { ifr.ifr_ifru.ifru_addr.sa_data.len() };
+            ptr = ptr.wrapping_add(sa_len + IFNAMSIZ);
+        }
+        #[cfg(not(feature = "HAVE_SOCKADDR_SA_LEN"))]
+        {
+            ptr = ptr.wrapping_add(std::mem::size_of::<IfReq>());
+        }
+
+        unsafe {
+            // println!("xxxxxxxxxxxxxxxxxxxxx ifr.ifr_ifru.ifru_addr.sa_family={:?}  ", ifr.ifr_ifru.ifru_addr.sa_family);
+            if ifr.ifr_ifru.ifru_addr.sa_family == AF_INET {
+                addr = MySockAddr {
+                    in_: SockAddrIn {
+                        sin_family: AF_INET,
+                        sin_port: port.to_be(), // htons() 等价的操作
+                        sin_addr: InAddr::from_ipv4_addr(Ipv4Addr::new(
+                            ifr.ifr_ifru.ifru_addr.sa_data[2],
+                            ifr.ifr_ifru.ifru_addr.sa_data[3],
+                            ifr.ifr_ifru.ifru_addr.sa_data[4],
+                            ifr.ifr_ifru.ifru_addr.sa_data[5],
+                        )),
+                        sin_zero: [0; 8],
+                    },
+                };
+            } else if ifr.ifr_ifru.ifru_addr.sa_family == AF_INET6 {
+                addr = MySockAddr {
+                    in6: SockAddrIn6 {
+                        sin6_family: AF_INET6,
+                        sin6_port: port.to_be(),     // htons() 等价的操作
+                        sin6_flowinfo: 0u32.to_be(), // htonl(0) 等价的操作
+                        sin6_addr: In6Addr::from_ipv6_addr(Ipv6Addr::new(
+                            ((ifr.ifr_ifru.ifru_addr.sa_data[0] as u16) << 8)
+                                | (ifr.ifr_ifru.ifru_addr.sa_data[1] as u16),
+                            ((ifr.ifr_ifru.ifru_addr.sa_data[2] as u16) << 8)
+                                | (ifr.ifr_ifru.ifru_addr.sa_data[3] as u16),
+                            ((ifr.ifr_ifru.ifru_addr.sa_data[4] as u16) << 8)
+                                | (ifr.ifr_ifru.ifru_addr.sa_data[5] as u16),
+                            ((ifr.ifr_ifru.ifru_addr.sa_data[6] as u16) << 8)
+                                | (ifr.ifr_ifru.ifru_addr.sa_data[7] as u16),
+                            ((ifr.ifr_ifru.ifru_addr.sa_data[8] as u16) << 8)
+                                | (ifr.ifr_ifru.ifru_addr.sa_data[9] as u16),
+                            ((ifr.ifr_ifru.ifru_addr.sa_data[10] as u16) << 8)
+                                | (ifr.ifr_ifru.ifru_addr.sa_data[11] as u16),
+                            ((ifr.ifr_ifru.ifru_addr.sa_data[12] as u16) << 8)
+                                | (ifr.ifr_ifru.ifru_addr.sa_data[13] as u16),
+                            0,
+                        )),
+                        sin6_scope_id: 0,
+                    },
+                };
+            } else {
+                continue;
+            }
+
+            let res = ioctl(fd, libc::SIOCGIFFLAGS, ifr);
+            if res < 0 {
+                let errno = Errno::last();
+                if errno != Errno::EINVAL || lastlen != 0 {
+                    close(fd).unwrap_or_else(|e| {
+                        eprintln!("ioctl error getting interface flags: {:?}", e)
+                    });
+                    return Err(format!("ioctl error: {}", errno));
+                }
+            }
+            // 将字节数组转为切片，查找空字节的位置
+            let name_bytes = &ifr.ifr_ifrn.ifrn_name;
+            let end = name_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(name_bytes.len());
+
+            // 截取到第一个空字节为止的有效部分
+            let name_str = match std::str::from_utf8(&name_bytes[..end]) {
+                Ok(name) => name,
+                Err(_) => {
+                    return Err("Invalid UTF-8 sequence in interface name".to_string());
+                }
+            };
+
+            let err = add_iface(
+                interfacep,
+                ifr.ifr_ifru.ifru_flags.try_into().unwrap(),
+                name_str,
+                &addr,
+                names.clone(),
+                addrs.clone(),
+                except.clone(),
+            );
+            if err.is_some() {
+                close(fd)
+                    .unwrap_or_else(|e| eprintln!("ioctl error getting interface flags: {:?}", e));
+                return Err(format!("ioctl error: {:?}", err));
+            }
+
+            if dhcp.is_some()
+                && addr.sa.sa_family == AF_INET
+                && ((ifr.ifr_ifru.ifru_flags & IFF_LOOPBACK != 0)
+                    || (ifr.ifr_ifru.ifru_flags & IFF_POINTOPOINT != 0))
+            {}
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/*
+//将 `Ipv4Addr` 转换为 `InAddr`
 fn create_in_addr(ip: Ipv4Addr) -> InAddr {
     InAddr {
         s_addr: u32::from(ip).to_be(), // 转换为网络字节序
@@ -246,6 +496,7 @@ fn get_network_interfaces() -> Vec<Interface> {
         }
     }
 }
+*/
 
 pub fn check_servers(
     mut new: Option<Box<Server>>,
