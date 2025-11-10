@@ -20,7 +20,7 @@ static mut FILE_DIRTY: Option<u32> = None;
 static mut LEASES: Option<Box<DhcpLease>> = None;
 static LEASE_FILE_PATH: &str = "/var/lib/misc/dnsmasq.leases";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DhcpLease {
     pub clid_len: usize,
     pub clid: Vec<u8>,
@@ -28,7 +28,7 @@ pub struct DhcpLease {
     pub fqdn: Option<String>,
     pub expires: u64, // 使用u64表示UNIX时间戳
     pub hwaddr: [u8; ETHER_ADDR_LEN],
-    pub addr: AllAddr,
+    pub addr: InAddr,
     pub next: Option<Box<DhcpLease>>,
 }
 
@@ -82,7 +82,7 @@ pub fn lease_init(
             hwaddr: [e0 as u8, e1 as u8, e2 as u8, e3 as u8, e4 as u8, e5 as u8],
             hostname: None,
             fqdn: None,
-            addr: AllAddr::Addr4(Ipv4Addr::new(0, 0, 0, 0)),
+            addr: InAddr::new(0),
             expires: ei,
             next: None,
         });
@@ -311,12 +311,13 @@ pub fn lease_prune(mut target: Option<Box<DhcpLease>>, now: SystemTime) {
 }
 
 // 全局租约链表中查找指定的IPv4地址
-pub fn lease_find_by_addr(addr: Ipv4Addr) -> bool {
+pub fn lease_find_by_addr(addr: InAddr) -> bool {
     unsafe {
         // 遍历全局租约链表
         let mut lease = &LEASES;
         while let Some(ref current_lease) = lease {
-            if current_lease.addr == cache::AllAddr::Addr4(addr) {
+            // 直接比较 `InAddr` 类型的字段
+            if current_lease.addr == addr {
                 return true; // 找到匹配的租约
             }
             lease = &current_lease.next; // 移动到下一个节点
@@ -356,7 +357,7 @@ pub fn lease_find_by_client(clid: &[u8], clid_len: usize) -> Option<Box<DhcpLeas
 pub fn lease_allocate(
     clid: Option<&[u8]>,
     clid_len: usize,
-    addr: AllAddr,
+    addr: InAddr,
 ) -> Option<Box<DhcpLease>> {
     unsafe {
         // 分配新的租约

@@ -112,21 +112,11 @@ pub fn add_iface(
             return None;
         }
     }
-    println!(" aaaaaaaaaaaaaaaaaaaa ");
 
     if addrs.is_some() {
         tmp = addrs;
         while let Some(mut current_addr) = tmp.take() {
             // 使用 take 方法
-            unsafe {
-                println!(
-                    " aaaaaaaaaaaaaaaaaaaa&current_addr.addr{:?} ",
-                    &current_addr.addr.in_.sin_addr.s_addr
-                );
-            }
-            unsafe {
-                println!(" aaaaaaaaaaaaaaaaaaaaaddr{:?} ", addr.in_.sin_addr.s_addr);
-            }
             if sockaddr_isequal(&current_addr.addr, addr) {
                 current_addr.found = true;
                 println!(" current_addr.found is true");
@@ -354,7 +344,50 @@ pub fn enumerate_interfaces(
                 && addr.sa.sa_family == AF_INET
                 && ((ifr.ifr_ifru.ifru_flags & IFF_LOOPBACK != 0)
                     || (ifr.ifr_ifru.ifru_flags & IFF_POINTOPOINT != 0))
-            {}
+            {
+                let mut netmask: Option<Box<InAddr>> = None;
+                let mut broadcast: Option<Box<InAddr>> = None;
+                let opt = 1;
+                let res = ioctl(fd, libc::SIOCGIFNETMASK, ifr);
+                if res < 0 {
+                    let errno = Errno::last();
+                    if errno != Errno::EINVAL || lastlen != 0 {
+                        close(fd).unwrap_or_else(|e| eprintln!("Failed to close socket: {}", e));
+                        return Err(format!(
+                            "ioctl error getting interface netmask: {:?}",
+                            errno
+                        ));
+                    }
+                }
+
+                let sockaddr_in_ptr = &ifr.ifr_ifru.ifru_addr as *const _ as *const SockAddrIn;
+                let netmask = (*sockaddr_in_ptr).sin_addr;
+
+                let res = ioctl(fd, libc::SIOCGIFBRDADDR, ifr);
+                if res < 0 {
+                    let errno = Errno::last();
+                    if errno != Errno::EINVAL || lastlen != 0 {
+                        close(fd).unwrap_or_else(|e| eprintln!("Failed to close socket: {}", e));
+                        return Err(format!(
+                            "ioctl error getting interface broadcast address: {:?}",
+                            errno
+                        ));
+                    }
+                }
+
+                let sockaddr_in_ptr = &ifr.ifr_ifru.ifru_addr as *const _ as *const SockAddrIn;
+                let broadcast = (*sockaddr_in_ptr).sin_addr;
+
+                let mut context = dhcp.as_mut();
+                while let Some(ref ctx) = context {
+                    if ctx.iface.is_empty()
+                        && (addr.in_.sin_addr.s_addr & netmask.s_addr)
+                            == (ctx.start.s_addr & netmask.s_addr)
+                        && (addr.in_.sin_addr.s_addr & netmask.s_addr)
+                            == (ctx.end.s_addr & netmask.s_addr)
+                    {}
+                }
+            }
             break;
         }
     }

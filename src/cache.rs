@@ -672,7 +672,7 @@ pub fn add_hosts_entry(
 // 向缓存中添加新的条目
 pub fn cache_add_dhcp_entry(
     host_name: &str,
-    host_address: AllAddr,
+    host_address: InAddr,
     ttd: u64,
     flags: u32,
     caches: &mut Cache,
@@ -686,13 +686,7 @@ pub fn cache_add_dhcp_entry(
                 let current_crec = &mut *crec; // 解引用裸指针
                 if current_crec.flags & F_NEG != 0 {
                     // 如果有负缓存条目，先释放
-                    cache_scan_free(
-                        caches,
-                        Some(host_name),
-                        Some(&host_address),
-                        SystemTime::now(),
-                        F_IPV4,
-                    );
+                    cache_scan_free(caches, Some(host_name), None, SystemTime::now(), F_IPV4);
                 } else {
                     // 找到相同主机名的 DHCP 条目，直接返回
                     println!(
@@ -705,17 +699,21 @@ pub fn cache_add_dhcp_entry(
         }
 
         // 查找地址中的条目
-        if let Some(crecp) =
-            cache_find_by_addr(caches, None, &host_address, SystemTime::now(), F_IPV4)
-        {
+        if let Some(crecp) = cache_find_by_addr(
+            caches,
+            None,
+            &AllAddr::Addr4(host_address.to_ipv4_addr()),
+            SystemTime::now(),
+            F_IPV4,
+        ) {
             // 如果找到相同地址的 DHCP 条目
             if let Some(crec) = crecp.as_mut() {
                 let current_crec = &mut *crec; // 解引用裸指针
                 if current_crec.flags & F_NEG != 0 {
                     cache_scan_free(
                         caches,
-                        Some(host_name),
-                        Some(&host_address),
+                        None,
+                        Some(&AllAddr::Addr4(host_address.to_ipv4_addr())),
                         SystemTime::now(),
                         F_IPV4,
                     );
@@ -750,7 +748,7 @@ pub fn cache_add_dhcp_entry(
             } else {
                 current_crec.ttd = SystemTime::now() + std::time::Duration::from_secs(ttd);
             }
-            current_crec.addr = host_address; // 直接使用地址
+            current_crec.addr = AllAddr::Addr4(host_address.to_ipv4_addr()); // 直接使用地址
             current_crec.name = Name::Namep(Box::new(host_name.to_string())); // 转换为 String
 
             current_crec.prev = caches.dhcp_inuse; // 连接到当前 DHCP 使用的条目
@@ -886,6 +884,7 @@ pub fn dump_cache(debug: i32, cache: &Cache) {
         let cache_size = cache.cache_size;
         let cache_live_freed = cache.cache_live_freed;
         let cache_inserted = cache.cache_inserted;
+
         syslog!(
             LOG_INFO,
             "Cache size {:?}, {:?}/{:?} cache insertions re-used unexpired cache entries.",
@@ -895,7 +894,10 @@ pub fn dump_cache(debug: i32, cache: &Cache) {
         );
 
         if debug != 0 {
-            syslog!(LOG_DEBUG, "Host                                     Address                        Flags     Expires", );
+            syslog!(
+                 LOG_DEBUG,
+                 "Host                                     Address                        Flags     Expires",
+             );
 
             // 遍历哈希表
             for entry in &cache.hash_table {
@@ -903,6 +905,7 @@ pub fn dump_cache(debug: i32, cache: &Cache) {
                 while let Some(c) = cache_entry {
                     let c_ref: &Crec = &*c; // 解引用获取 Crec 结构体
 
+                    // 获取地址的字符串表示
                     let addrbuff = match c_ref.addr {
                         AllAddr::Addr4(addr) => format!("{}", addr),
                         AllAddr::Addr6(addr) => format!("{}", addr),
@@ -985,7 +988,6 @@ pub fn cache_insert(
         Err(_) => None, // 如果转换失败，忽略此字符串
     };
 
-    // 将 `data` 转换为 `AllAddr` 类型（假设我们只有 IPv4 地址）
     let addr_converted = if let Some(data) = data {
         if data.len() == INADDRSZ {
             let ipv4 = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
@@ -1016,15 +1018,10 @@ pub fn cache_insert(
 
         let new = unsafe { &mut *caches.cache_tail.unwrap() };
 
-        // 如果 LRU 列表末尾仍在使用中：如果没有扫描所有哈希链以查找过期条目，现在执行此操作。
-        // 如果已经尝试过，那么现在开始清除条目。
+        // 如果 LRU 列表末尾仍在使用中
         if new.flags & (F_FORWARD | F_REVERSE) != 0 {
             if freed_all {
-                let addr_option = match &new.addr {
-                    AllAddr::Addr4(ipv4) => Some(AllAddr::Addr4(*ipv4)),
-                    AllAddr::Addr6(ipv6) => Some(AllAddr::Addr6(*ipv6)),
-                };
-                cache_scan_free(caches, name_str, addr_option.as_ref(), now, new.flags);
+                cache_scan_free(caches, name_str, Some(&new.addr), now, new.flags);
             } else {
                 cache_scan_free(caches, None, None, now, 0);
                 freed_all = true;
@@ -1032,7 +1029,7 @@ pub fn cache_insert(
             continue;
         }
 
-        // 检查是否需要为长名称分配额外内存，如果失败，则直接返回。
+        // 检查是否需要为长名称分配额外内存
         let mut big_name = None;
         if name.len() > SMALLDNAME - 1 {
             if let Some(free) = caches.big_free.take() {
@@ -1055,12 +1052,13 @@ pub fn cache_insert(
         break;
     }
 
+    // 创建新的缓存条目
     let new_entry = Box::new(Crec {
         next: None,
         prev: None,
         hash_next: None,
         ttd: now + Duration::new(ttl as u64, 0),
-        addr: addr_converted.expect("REASON"),
+        addr: addr_converted.expect("Address conversion failed"),
         flags,
         name: if name.len() > SMALLDNAME - 1 {
             // 如果名称长度超过 SMALLDNAME，则使用 Bigname
@@ -1082,6 +1080,7 @@ pub fn cache_insert(
         },
     });
 
+    // 插入新条目到缓存链表
     let new_entry_ptr = Box::into_raw(new_entry);
     unsafe {
         if let Some(chain) = caches.new_chain {
