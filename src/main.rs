@@ -218,7 +218,7 @@ fn main() {
     let mut serv_addrs: Option<Box<Server>> = None;
     let mut dnamebuff = vec![0u8; MAXDNAME];
     let mut packet = vec![0u8; PACKETSZ + MAXDNAME + RRFIXEDSZ];
-    let mut dhcp_next_server = Ipv4Addr::new(0, 0, 0, 0);
+    let mut dhcp_next_server = InAddr::new(0);
     let leasefd: i32 = 0;
     let mut sfds: Option<Box<ServerFd>> = None;
 
@@ -487,7 +487,7 @@ fn main() {
     let mut dhcp_tmp = &dhcp;
     while let Some(ref config) = dhcp_tmp {
         // 获取起始 IP 地址
-        let _dnamebuff = config.start.to_string();
+        let _dnamebuff = Ipv4Addr::from(u32::from_be(config.start.s_addr)).to_string();
 
         // 租约时间格式化
         let _packet = if config.lease_time == 0 {

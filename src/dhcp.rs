@@ -20,7 +20,7 @@ const ETHERTYPE_IP: u16 = 0x0800;
 const ETHER_ADDR_LEN: usize = 6;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Ip {
     pub version_and_header_length: u8,
     pub tos: u8,
@@ -30,8 +30,8 @@ pub struct Ip {
     pub ttl: u8,
     pub protocol: u8,
     pub checksum: u16,
-    pub src_addr: Ipv4Addr,
-    pub dst_addr: Ipv4Addr,
+    pub src_addr: InAddr,
+    pub dst_addr: InAddr,
 }
 
 #[repr(C)]
@@ -44,7 +44,7 @@ pub struct UdpHdr {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct DhcpPacket {
     pub op: u8,
     pub htype: u8,
@@ -53,10 +53,10 @@ pub struct DhcpPacket {
     pub xid: u32,
     pub secs: u16,
     pub flags: u16,
-    pub ciaddr: Ipv4Addr,
-    pub yiaddr: Ipv4Addr,
-    pub siaddr: Ipv4Addr,
-    pub giaddr: Ipv4Addr,
+    pub ciaddr: InAddr,
+    pub yiaddr: InAddr,
+    pub siaddr: InAddr,
+    pub giaddr: InAddr,
     pub chaddr: [u8; 6],
     pub sname: [u8; 64],
     pub file: [u8; 128],
@@ -65,7 +65,7 @@ pub struct DhcpPacket {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct UdpDhcpPacket {
     pub ip: Ip,
     pub udp: UdpHdr,
@@ -138,24 +138,26 @@ pub fn is_addr_in_context(context: Option<&DhcpContext>, config: &DhcpConfig) ->
     let context = context.unwrap();
 
     // 如果配置的地址为 0.0.0.0，返回 true
-    if config.addr == Ipv4Addr::new(0, 0, 0, 0) {
+    if config.addr == InAddr::new(0) {
         return true;
     }
 
     // 检查地址是否在上下文中
     let addr_masked = config
         .addr
+        .s_addr
         .octets()
         .iter()
-        .zip(context.netmask.octets().iter())
+        .zip(context.netmask.s_addr.octets().iter())
         .map(|(&a, &m)| a & m)
         .collect::<Vec<u8>>();
 
     let start_masked = context
         .start
+        .s_addr
         .octets()
         .iter()
-        .zip(context.netmask.octets().iter())
+        .zip(context.netmask.s_addr.octets().iter())
         .map(|(&s, &m)| s & m)
         .collect::<Vec<u8>>();
 
@@ -174,14 +176,13 @@ pub fn dhcp_packet(
     domain_suffix: Option<String>,
     dhcp_file: &mut Option<String>,
     dhcp_sname: &mut Option<String>,
-    dhcp_next_server: Ipv4Addr,
+    dhcp_next_server: InAddr, // 修改后的类型为 InAddr
 ) {
     // 将接收到的数据转换为 UdpDhcpPacket 结构体
     let rawpacket = unsafe { &mut *(packet.as_mut_ptr() as *mut UdpDhcpPacket) };
 
     // 如果有 DHCP 上下文则继续处理
     if let Some(context) = context {
-        // 使用标准库的 `UdpSocket` 接收 DHCP 请求
         let socket = UdpSocket::bind(SocketAddr::new(
             Ipv4Addr::UNSPECIFIED.into(),
             DHCP_SERVER_PORT,
@@ -191,15 +192,9 @@ pub fn dhcp_packet(
         let sz = socket.recv(packet).expect("Failed to receive packet");
 
         // 检查数据包是否为有效大小
-        if sz > (std::mem::size_of::<DhcpPacket>()) {
+        if sz > std::mem::size_of::<DhcpPacket>() {
             lease_prune(None, now); // 清除过期租约
 
-            // 提前处理 dhcp_file 和 dhcp_sname，以避免所有权问题
-            // let mut default_file = String::new();
-            // let dhcp_file_ref = dhcp_file.as_deref_mut().unwrap_or(&mut default_file);
-
-            // let mut default_sname = String::new();
-            // let dhcp_sname_ref = dhcp_sname.as_deref_mut().unwrap_or(&mut default_sname);
             let domain_suffix_str = domain_suffix.as_deref().unwrap_or("");
 
             let newlen = dhcp_reply(
@@ -213,7 +208,7 @@ pub fn dhcp_packet(
                 domain_suffix_str,
                 dhcp_file,
                 dhcp_sname,
-                dhcp_next_server,
+                dhcp_next_server, // 直接传递 InAddr 类型
             );
 
             let _ = lease_update_dns(caches, 0); // 更新 DNS 租约
@@ -225,15 +220,14 @@ pub fn dhcp_packet(
                     broadcast = true;
                 }
 
-                // 判断是否需要发送到网关或客户端地址
                 if !rawpacket.data.giaddr.is_unspecified()
                     || !rawpacket.data.ciaddr.is_unspecified()
                 {
                     let dest = SocketAddr::new(
                         if !rawpacket.data.giaddr.is_unspecified() {
-                            std::net::IpAddr::V4(rawpacket.data.giaddr)
+                            std::net::IpAddr::V4(rawpacket.data.giaddr.to_ipv4_addr())
                         } else {
-                            std::net::IpAddr::V4(rawpacket.data.ciaddr)
+                            std::net::IpAddr::V4(rawpacket.data.ciaddr.to_ipv4_addr())
                         },
                         if !rawpacket.data.giaddr.is_unspecified() {
                             DHCP_SERVER_PORT
@@ -246,7 +240,6 @@ pub fn dhcp_packet(
                         .send_to(&packet[..newlen as usize], dest)
                         .expect("Failed to send DHCP packet");
                 } else {
-                    // 使用 `pnet` 库构建并发送广播包
                     if broadcast {
                         let mut ethernet_buffer = [0u8; 42]; // 42字节是以太网帧头的大小
                         let mut ethernet_packet =
@@ -262,7 +255,7 @@ pub fn dhcp_packet(
                         ipv4_packet.set_header_length(5);
                         ipv4_packet.set_total_length((20 + newlen as u16) as u16);
                         ipv4_packet.set_next_level_protocol(IpNextHeaderProtocols::Udp);
-                        ipv4_packet.set_source(context.serv_addr);
+                        ipv4_packet.set_source(u32::from_be(context.serv_addr.s_addr).into());
                         ipv4_packet.set_destination(Ipv4Addr::BROADCAST);
                         ipv4_packet.set_checksum(ipv4_checksum(&ipv4_packet));
 
@@ -305,7 +298,7 @@ fn ipv4_checksum(packet: &MutableIpv4Packet) -> u16 {
 pub fn address_allocate(
     context: &DhcpContext,
     config: Option<Box<DhcpConfig>>,
-    addr: &mut Ipv4Addr,
+    addr: &mut InAddr,
 ) -> bool {
     let mut current = context.last; // 从上次分配的地址开始
     let start = context.last; // 记录起始地址以避免死循环
@@ -316,7 +309,7 @@ pub fn address_allocate(
             current = context.start;
         } else {
             // 将当前地址递增
-            current = Ipv4Addr::from(u32::from(current).wrapping_add(1));
+            current.s_addr = current.s_addr.wrapping_add(1);
         }
 
         // 检查当前地址是否已被租约占用
@@ -348,11 +341,11 @@ pub fn address_allocate(
 }
 
 // 用于检查给定的 IPv4 地址是否在 DHCP 上下文中可用
-pub fn address_available(context: &DhcpContext, addr: Ipv4Addr) -> bool {
+pub fn address_available(context: &DhcpContext, addr: InAddr) -> bool {
     // 将 IPv4 地址转换为 u32 进行比较
-    let addr_u32 = u32::from(addr);
-    let start_u32 = u32::from(context.start);
-    let end_u32 = u32::from(context.end);
+    let addr_u32 = u32::from(addr.s_addr);
+    let start_u32 = u32::from(context.start.s_addr);
+    let end_u32 = u32::from(context.end.s_addr);
 
     // 检查地址是否在允许范围内
     if addr_u32 < start_u32 || addr_u32 > end_u32 {

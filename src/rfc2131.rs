@@ -109,7 +109,7 @@ pub fn dhcp_reply(
     domain_suffix: &str,
     dhcp_file: &mut Option<String>,
     dhcp_sname: &mut Option<String>,
-    dhcp_next_server: Ipv4Addr,
+    dhcp_next_server: InAddr,
 ) -> i32 {
     let mut hostname: Option<String> = None;
     let req_options: Option<String> = None;
@@ -235,14 +235,11 @@ pub fn dhcp_reply(
                     packet.yiaddr = option_addr(opt);
                 }
                 if let Some(lease) = lease {
-                    match lease.addr {
-                        AllAddr::Addr4(ipv4) => packet.yiaddr = ipv4,
-                        _ => {}
-                    }
+                    packet.yiaddr = lease.addr;
                 } else if let Some(config) = config {
-                    if config.addr != Ipv4Addr::UNSPECIFIED && lease_find_by_addr(config.addr) {
+                    if config.addr.s_addr != 0 && lease_find_by_addr(config.addr) {
                         packet.yiaddr = config.addr;
-                    } else if packet.yiaddr == Ipv4Addr::UNSPECIFIED
+                    } else if packet.yiaddr.s_addr == 0
                         || !address_available(context, packet.yiaddr)
                     {
                         if !address_allocate(context, dhcp_configs, &mut packet.yiaddr) {
@@ -250,6 +247,7 @@ pub fn dhcp_reply(
                         }
                     }
                 }
+
                 bootp_option_put(packet, dhcp_file, dhcp_sname);
                 packet.siaddr = dhcp_next_server;
                 packet.siaddr = dhcp_next_server;
@@ -257,7 +255,7 @@ pub fn dhcp_reply(
                 // 添加 OPTION_MESSAGE_TYPE 选项
                 let mut p = option_put(p, end, OPTION_MESSAGE_TYPE, 1, DHCPOFFER);
                 // 添加 OPTION_SERVER_IDENTIFIER 选项
-                let u32_val = u32::from_be_bytes(context.serv_addr.octets());
+                let u32_val = u32::from_be_bytes(context.serv_addr.s_addr.octets());
                 p = option_put(
                     p,
                     end,
@@ -292,13 +290,13 @@ pub fn dhcp_reply(
                     .unwrap();
             }
             DHCPREQUEST => {
-                if packet.ciaddr != Ipv4Addr::new(0, 0, 0, 0) {
+                if packet.ciaddr != InAddr::new(0) {
                     // RENEWING or REBINDING
                     // 必须存在此地址的租约
                     if lease.is_none() {
-                        packet.siaddr = Ipv4Addr::new(0, 0, 0, 0);
-                        packet.yiaddr = Ipv4Addr::new(0, 0, 0, 0);
-                        packet.ciaddr = Ipv4Addr::new(0, 0, 0, 0);
+                        packet.siaddr = InAddr::new(0);
+                        packet.yiaddr = InAddr::new(0);
+                        packet.ciaddr = InAddr::new(0);
                         bootp_option_put(&mut packet.clone(), &mut None, &mut None);
                         let end = &packet.options[308..];
                         p = option_put(p, end, OPTION_MESSAGE_TYPE, 1, DHCPNAK);
@@ -323,7 +321,7 @@ pub fn dhcp_reply(
 
                     // 如果有租约并且地址与请求的地址不匹配，则删除该租约
                     if let Some(leases) = &lease {
-                        if leases.addr != cache::AllAddr::Addr4(packet.yiaddr) {
+                        if leases.addr != packet.yiaddr {
                             lease_prune(Some(leases.clone()), now);
                             lease = None;
                         }
@@ -333,12 +331,12 @@ pub fn dhcp_reply(
                     if lease.is_none()
                         && !address_available(context, packet.yiaddr)
                         && (config.is_none()
-                            || config.as_ref().unwrap().addr == Ipv4Addr::new(0, 0, 0, 0)
+                            || config.as_ref().unwrap().addr == InAddr::new(0)
                             || config.as_ref().unwrap().addr != packet.yiaddr)
                     {
-                        packet.siaddr = Ipv4Addr::new(0, 0, 0, 0);
-                        packet.yiaddr = Ipv4Addr::new(0, 0, 0, 0);
-                        packet.ciaddr = Ipv4Addr::new(0, 0, 0, 0);
+                        packet.siaddr = InAddr::new(0);
+                        packet.yiaddr = InAddr::new(0);
+                        packet.ciaddr = InAddr::new(0);
                         let end = &packet.options[308..];
                         bootp_option_put(&mut packet.clone(), &mut None, &mut None);
                         p = option_put(p, end, OPTION_MESSAGE_TYPE, 1, DHCPNAK);
@@ -349,15 +347,16 @@ pub fn dhcp_reply(
                     }
 
                     if lease.is_none() {
-                        lease = lease_allocate(
-                            Some(clid),
-                            clid_len,
-                            cache::AllAddr::Addr4(packet.yiaddr),
-                        );
+                        let mut yiaddr = packet.yiaddr;
+                        if !address_allocate(context, dhcp_configs, &mut yiaddr) {
+                            return 0;
+                        }
+                        lease = lease_allocate(Some(clid), clid_len, packet.yiaddr);
                         if lease.is_none() {
                             return 0;
                         }
                     }
+
                     // 设置租约硬件地址
                     lease_set_hwaddr(&mut lease, &packet.chaddr);
 
@@ -392,7 +391,7 @@ pub fn dhcp_reply(
                     let p = option_put(p, end, OPTION_MESSAGE_TYPE, 1, DHCPACK);
 
                     // 添加 OPTION_SERVER_IDENTIFIER 选项
-                    let server_identifier = context.serv_addr.octets();
+                    let server_identifier = context.serv_addr.s_addr.octets();
                     let u32_val = u32::from_be_bytes(server_identifier);
                     let p = option_put(
                         p,
@@ -433,7 +432,7 @@ pub fn dhcp_reply(
                 let p = option_put(p, end, OPTION_MESSAGE_TYPE, 1, DHCPACK);
 
                 // 添加 OPTION_SERVER_IDENTIFIER 选项
-                let server_identifier = context.serv_addr.octets();
+                let server_identifier = context.serv_addr.s_addr.octets();
                 let u32_val = u32::from_be_bytes(server_identifier);
                 let p = option_put(
                     p,
@@ -487,7 +486,7 @@ fn do_req_options<'a>(
     if in_list(req_options_bytes, OPTION_NETMASK)
         && !option_find_dhcp(config_opts, OPTION_NETMASK).is_none()
     {
-        let netmask = context.broadcast.octets();
+        let netmask = context.broadcast.s_addr.octets();
         let u32_val = u32::from_be_bytes(netmask);
         p = option_put(
             p,
@@ -502,7 +501,7 @@ fn do_req_options<'a>(
     if in_list(req_options_bytes, OPTION_BROADCAST)
         && !option_find_dhcp(config_opts, OPTION_BROADCAST).is_none()
     {
-        let broadcast = context.broadcast.octets();
+        let broadcast = context.broadcast.s_addr.octets();
         let u32_val = u32::from_be_bytes(broadcast);
         p = option_put(
             p,
@@ -517,7 +516,7 @@ fn do_req_options<'a>(
     if in_list(req_options_bytes, OPTION_ROUTER)
         && !option_find_dhcp(config_opts, OPTION_ROUTER).is_none()
     {
-        let router = context.serv_addr.octets();
+        let router = context.serv_addr.s_addr.octets();
         let u32_val = u32::from_be_bytes(router);
         p = option_put(p, end, OPTION_ROUTER, INADDRSZ, u32_val.try_into().unwrap());
     }
@@ -526,7 +525,7 @@ fn do_req_options<'a>(
     if in_list(req_options_bytes, OPTION_DNSSERVER)
         && !option_find_dhcp(config_opts, OPTION_DNSSERVER).is_none()
     {
-        let dns_server = context.serv_addr.octets();
+        let dns_server = context.serv_addr.s_addr.octets();
         let u32_val = u32::from_be_bytes(dns_server);
         p = option_put(
             p,
@@ -665,8 +664,8 @@ fn bootp_option_put(
     }
 }
 
-fn option_addr(opt: &[u8]) -> Ipv4Addr {
-    Ipv4Addr::new(opt[0], opt[1], opt[2], opt[3])
+fn option_addr(opt: &[u8]) -> InAddr {
+    InAddr::new(0)
 }
 
 pub fn option_ptr(opt: &[u8]) -> &[u8] {

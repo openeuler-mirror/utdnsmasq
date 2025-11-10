@@ -24,7 +24,7 @@ pub struct BogusAddr {
     pub next: Option<Box<BogusAddr>>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 pub struct InAddr {
     pub s_addr: InAddrT,
@@ -38,6 +38,14 @@ impl InAddr {
         InAddr {
             s_addr: u32::from(addr).to_be(), // 将 Ipv4Addr 转换为 u32
         }
+    }
+
+    pub fn to_ipv4_addr(&self) -> std::net::Ipv4Addr {
+        std::net::Ipv4Addr::from(u32::from_be(self.s_addr))
+    }
+
+    pub fn is_unspecified(&self) -> bool {
+        self.s_addr == 0
     }
 }
 #[derive(Copy, Clone)]
@@ -142,7 +150,7 @@ pub struct ResolvC {
 }
 
 pub const ETHER_ADDR_LEN: usize = 6;
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DhcpContext {
     pub fd: i32,
     pub rawfd: i32,
@@ -150,12 +158,12 @@ pub struct DhcpContext {
     pub iface: String,
     pub hwaddr: [u8; ETHER_ADDR_LEN],
     pub lease_time: u32,
-    pub serv_addr: Ipv4Addr,
-    pub netmask: Ipv4Addr,
-    pub broadcast: Ipv4Addr,
-    pub start: Ipv4Addr,
-    pub end: Ipv4Addr,
-    pub last: Ipv4Addr,
+    pub serv_addr: InAddr,
+    pub netmask: InAddr,
+    pub broadcast: InAddr,
+    pub start: InAddr,
+    pub end: InAddr,
+    pub last: InAddr,
     pub next: Option<Box<DhcpContext>>,
 }
 
@@ -169,24 +177,24 @@ impl Default for DhcpContext {
             hwaddr: [0; ETHER_ADDR_LEN],
             lease_time: 0,
             // 地址先默认给0  0.0.0.0 有特殊用途 目前不知道这样给会不会有问题 待测试
-            serv_addr: Ipv4Addr::new(0, 0, 0, 0),
-            netmask: Ipv4Addr::new(0, 0, 0, 0),
-            broadcast: Ipv4Addr::new(0, 0, 0, 0),
-            start: Ipv4Addr::new(0, 0, 0, 0),
-            end: Ipv4Addr::new(0, 0, 0, 0),
-            last: Ipv4Addr::new(0, 0, 0, 0),
+            serv_addr: InAddr::new(0),
+            netmask: InAddr::new(0),
+            broadcast: InAddr::new(0),
+            start: InAddr::new(0),
+            end: InAddr::new(0),
+            last: InAddr::new(0),
             next: None,
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, PartialEq)]
 pub struct DhcpConfig {
     pub clid_len: usize,
     pub clid: Vec<u8>,
     pub hwaddr: [u8; ETHER_ADDR_LEN],
     pub hostname: Option<String>,
-    pub addr: Ipv4Addr,
+    pub addr: InAddr,
     pub lease_time: u32,
     pub next: Option<Box<DhcpConfig>>,
 }
@@ -197,7 +205,7 @@ impl Default for DhcpConfig {
             clid: Vec::new(),
             hwaddr: [0; ETHER_ADDR_LEN],
             hostname: None,
-            addr: Ipv4Addr::new(0, 0, 0, 0),
+            addr: InAddr::new(0),
             lease_time: DEFLEASE,
             next: None,
         }
@@ -329,7 +337,7 @@ pub fn read_opts(
     dhcp_opts: &mut Option<Box<DhcpOpt>>,
     dhcp_file: &mut Option<String>,
     dhcp_sname: &mut Option<String>,
-    dhcp_next_server: &mut Ipv4Addr,
+    dhcp_next_server: &mut InAddr,
 ) -> u32 {
     let mut flags: u32 = 0;
     let mut conffile: &str = CONFILE;
@@ -807,7 +815,7 @@ pub fn read_opts(
                         // 获取ip范围起始地址
                         match Ipv4Addr::from_str(iter[0]) {
                             Ok(ip) => {
-                                new.start = ip;
+                                new.start = InAddr::new(u32::from(ip).to_be());
                             }
                             Err(_) => {
                                 option_flag = "?";
@@ -817,7 +825,7 @@ pub fn read_opts(
                         // 获取ip范围结束地址
                         match Ipv4Addr::from_str(iter[1]) {
                             Ok(ip) => {
-                                new.end = ip;
+                                new.end = InAddr::new(u32::from(ip).to_be());
                             }
                             Err(_) => {
                                 option_flag = "?";
@@ -906,7 +914,7 @@ pub fn read_opts(
                             // ip地址
                             match Ipv4Addr::from_str(temp) {
                                 Ok(ip) => {
-                                    new.addr = ip;
+                                    new.addr = InAddr::new(u32::from(ip).to_be());
                                 }
                                 Err(_) => {
                                     println!("ip parse error");
@@ -1035,7 +1043,7 @@ pub fn read_opts(
                         if !comma.is_empty() {
                             match Ipv4Addr::from_str(comma) {
                                 Ok(ip) => {
-                                    *dhcp_next_server = ip;
+                                    *dhcp_next_server = InAddr::new(u32::from(ip).to_be());
                                 }
                                 Err(_) => {
                                     option_flag = "?";
