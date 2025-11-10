@@ -64,6 +64,10 @@ impl In6Addr {
             s6_addr: addr.octets(), // 将 Ipv6Addr 转换为 [u8; 16]
         }
     }
+
+    pub fn to_ipv6_addr(&self) -> Ipv6Addr {
+        Ipv6Addr::from(self.s6_addr)
+    }
 }
 
 #[derive(PartialEq, Copy, Clone)]

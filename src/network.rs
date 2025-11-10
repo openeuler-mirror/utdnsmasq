@@ -156,7 +156,27 @@ pub fn add_iface(
         current_iface = current.next.as_mut(); // 继续遍历链表
     }
 
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
+    let bind_addr: String = unsafe {
+        match addr.sa.sa_family {
+            AF_INET => {
+                // 处理 IPv4 地址
+                let ip: String = addr.in_.sin_addr.to_ipv4_addr().to_string();
+                let port: String = addr.in_.sin_port.to_string();
+                format!("{}:{}", ip, port)
+            }
+            AF_INET6 => {
+                // 处理 IPv6 地址
+                let ip = addr.in6.sin6_addr.to_ipv6_addr().to_string();
+                let port = addr.in6.sin6_port.to_string();
+                format!("{}:{}", ip, port)
+            }
+            _ => {
+                return Some("不支持的地址类型".to_string());
+            }
+        }
+    };
+
+    let socket = match UdpSocket::bind(bind_addr) {
         // 这里需要将自定义的SockAddr转换为合法的地址格式
         Ok(sock) => sock,
         Err(_) => return Some("创建套接字失败".to_string()),
@@ -164,6 +184,18 @@ pub fn add_iface(
 
     // 获取文件描述符
     let fd = socket.as_raw_fd();
+    // 设置允许多个套接字绑定到同一个地址和端口
+    unsafe {
+        let optval: i32 = 1; // 启用 SO_REUSEPORT
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEPORT,
+            &optval as *const _ as *const _,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+
     // 分配新的接口并添加到链表中
     let new_iface = Box::new(Irec {
         addr: *addr,
