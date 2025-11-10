@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use crate::util::*;
+use crate::util::*;
 use crate::*;
 use std::fs::File;
 use std::io::{self, BufRead};
@@ -183,7 +183,7 @@ pub fn cache_reload(
 ) {
     // 清除缓存逻辑
     for i in 0..caches.hash_size {
-        let mut up: Option<*mut Crec> = caches.hash_table[i];
+        let up: Option<*mut Crec> = caches.hash_table[i];
         let mut current: Option<*mut Crec> = up;
 
         while let Some(cache_ptr) = current {
@@ -195,13 +195,13 @@ pub fn cache_reload(
             // 处理 F_HOSTS 标志
             if cache.flags & F_HOSTS != 0 {
                 // 移除 F_HOSTS 标志的项
-                up = cache.hash_next; // 移除当前元素
+                cache.hash_next; // 移除当前元素
                 unsafe {
                     let _ = Box::from_raw(cache_ptr);
                 } // 释放当前缓存项
             } else if cache.flags & F_DHCP == 0 {
                 // 不是 DHCP 项，重置标志
-                up = cache.hash_next; // 继续移除
+                cache.hash_next; // 继续移除
                 if cache.flags & F_BIGNAME != 0 {
                     // 处理 BIGNAME 逻辑
                     if let Name::Bname(ref mut bname) = cache.name {
@@ -211,7 +211,7 @@ pub fn cache_reload(
                 }
                 cache.flags = 0; // 清除标志
             } else {
-                up = cache.hash_next; // 更新指针
+                cache.hash_next; // 更新指针
             }
         }
     }

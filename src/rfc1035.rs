@@ -38,8 +38,8 @@ const OPT_FILTER: u32 = 2;
 const T_SRV: u16 = 33;
 const T_MX: u16 = 15;
 const T_MAILB: u16 = 253;
-const SERVFAIL: u8 = 2;
-const REFUSED: u8 = 5;
+// const SERVFAIL: u8 = 2;
+// const REFUSED: u8 = 5;
 
 // 检查DNS响应数据包中是否存在虚假的IP地址
 pub fn check_for_bogus_wildcard(
@@ -388,8 +388,8 @@ pub fn extract_addresses(
                     );
                 }
             }
-            T_CNAME => {
-                let mut targp = p;
+            _t_cname => {
+                let targp = p;
                 p = psave;
                 for _ in 0..get_short(&mut &header_bytes[6..8]) {
                     let mut tmp = targp;
@@ -846,7 +846,7 @@ pub fn answer_request(
                 ans = 1;
             }
             if qtype == T_PTR || qtype == T_ANY {
-                while let Some(mut crec) = crecp.take() {
+                while let Some(crec) = crecp.take() {
                     // 确定 TTL 的值
                     let ttl = if crec.flags & (F_IMMORTAL | F_DHCP) != 0 {
                         local_ttl
