@@ -3,7 +3,6 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-
 use crate::rfc1035::*;
 use crate::util::*;
 use crate::*;
@@ -469,3 +468,15 @@ pub fn lookup_frec_by_sender(id: u16, addr: &MySockAddr) -> Option<Box<FRec>> {
     // 如果没有匹配，返回默认值
     None
 }
+
+pub fn reap_forward(fd: i32) {
+    let mut current = unsafe { FREC_LIST.as_mut() };
+
+    while let Some(f) = current {
+        if f.fd == fd {
+            f.new_id = 0; // 重置 new_id 字段
+        }
+        current = f.next.as_mut(); // 移动到下一个节点
+    }
+}
+
