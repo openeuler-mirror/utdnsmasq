@@ -95,8 +95,8 @@ pub fn add_iface(
 
     // 检查名称白名单
     if names.is_some() {
-        tmp = names.take();
-        while let Some(mut current_name) = tmp.take() {
+        tmp = names.clone();
+        while let Some(mut current_name) = tmp.clone() {
             // 使用 take 方法
             match current_name.name {
                 Some(cur_name) => {
@@ -107,22 +107,23 @@ pub fn add_iface(
                 }
                 _ => {}
             }
-            tmp = current_name.next.take();
+            tmp = current_name.next.clone();
         }
 
         if flags & 0x8 == 0 && tmp.is_some() {
             return None;
         }
     }
+
     if addrs.is_some() {
-        tmp = addrs.take();
-        while let Some(mut current_addr) = tmp.take() {
-            // 使用 take 方法
+        tmp = addrs.clone();
+        while let Some(mut current_addr) = tmp.clone() {
             if sockaddr_isequal(&current_addr.addr, addr) {
                 current_addr.found = true;
+                println!(" current_addr.found is true");
                 break;
             }
-            tmp = current_addr.next.take();
+            tmp = current_addr.next.clone();
         }
 
         if tmp.is_none() {
@@ -132,15 +133,14 @@ pub fn add_iface(
 
     // 检查黑名单
     if except.is_some() {
-        tmp = except.take();
-        while let Some(mut current) = tmp.take() {
-            // 使用 take 方法
+        tmp = except.clone();
+        while let Some(mut current) = tmp.clone() {
             if let Some(cur_name) = current.name {
                 if cur_name == name {
                     return None;
                 }
             }
-            tmp = current.next.take();
+            tmp = current.next.clone();
         }
     }
 
@@ -199,9 +199,9 @@ pub fn add_iface(
     // 分配新的接口并添加到链表中
     let new_iface = Box::new(Irec {
         addr: *addr,
-        fd,                // 使用文件描述符
-        valid: true,       // 设置为true表示有效
-        next: list.take(), // 将原来的链表连接到新节点
+        fd,                 // 使用文件描述符
+        valid: true,        // 设置为true表示有效
+        next: list.clone(), // 将原来的链表连接到新节点
     });
 
     *list = Some(new_iface);
@@ -261,10 +261,12 @@ pub fn enumerate_interfaces(
                     .unwrap_or_else(|e| eprintln!("Failed to close socket: {}", e));
                 return Err(format!("ioctl error: {}", errno));
             }
-        } else if ifc.ifc_len == lastlen {
-            break;
+        } else {
+            if ifc.ifc_len == lastlen {
+                break;
+            }
+            lastlen = ifc.ifc_len;
         }
-        lastlen = ifc.ifc_len;
         len += 10 * std::mem::size_of::<IfReq>();
     }
 
@@ -455,7 +457,7 @@ pub fn enumerate_interfaces(
         }
     }
     let mut prev: *mut Option<Box<Irec>> = interfacep; // 前置节点，使用裸指针避免借用冲突
-    while let Some(mut current_iface) = unsafe { (*prev).take() } {
+    while let Some(mut current_iface) = unsafe { (*prev).clone() } {
         if current_iface.valid {
             // 如果节点有效，继续遍历
             prev = &mut current_iface.next as *mut _; // 更新前置节点为当前节点的 next
@@ -472,7 +474,7 @@ pub fn enumerate_interfaces(
             reap_forward(current_iface.fd); // 清理挂起的请求
 
             // 提取当前节点的 next 并重新链接链表
-            let next = current_iface.next.take();
+            let next = current_iface.next.clone();
             unsafe {
                 *prev = next; // 更新前置节点的 next
             }
@@ -540,7 +542,7 @@ pub fn check_servers(
                 "Ignoring nameserver {} - local interface",
                 addr_str
             );
-            new = server.next.take();
+            new = server.next.clone();
             continue;
         }
 
@@ -554,14 +556,14 @@ pub fn check_servers(
                     "Ignoring nameserver {} - cannot make/bind socket",
                     addr_str
                 );
-                new = server.next.take();
+                new = server.next.clone();
                 continue;
             }
         }
 
         // 将服务器添加到返回链表
-        let next = server.next.take();
-        server.next = ret.take();
+        let next = server.next.clone();
+        server.next = ret.clone();
         ret = Some(server.clone());
         new = next;
 
@@ -633,12 +635,12 @@ pub fn reload_servers(
     let mut new_servers: Option<Box<Server>> = None;
 
     // 将旧服务器放入可重用列表中
-    while let Some(mut server) = serv.take() {
-        serv = server.next.take(); // 获取下一个节点
+    while let Some(mut server) = serv.clone() {
+        serv = server.next.clone(); // 获取下一个节点
         if server.flags & SERV_FROM_RESOLV != 0 {
             old_servers.push(server); // 将匹配的放入旧服务器队列
         } else {
-            server.next = new_servers.take();
+            server.next = new_servers.clone();
             new_servers = Some(server); // 保留非匹配服务器
         }
     }
@@ -744,7 +746,7 @@ pub fn reload_servers(
         };
 
         // 插入新服务器链表的头部
-        server.next = new_servers.take();
+        server.next = new_servers.clone();
         new_servers = Some(Box::new(*server));
     }
 
