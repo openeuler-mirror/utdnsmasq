@@ -56,7 +56,7 @@ pub fn reply_query(
     now: SystemTime,
     dnamebuff: &mut Vec<u8>,
     mut last_server: Option<Box<Server>>,
-    bogus_nxdomain: Option<Box<BogusAddr>>,
+    bogus_nxdomain: &mut Option<Box<BogusAddr>>,
     caches: &mut Cache,
 ) -> Option<Box<Server>> {
     let socket = unsafe { UdpSocket::from_raw_fd(fd) };
@@ -149,8 +149,8 @@ pub unsafe fn forward_query(
     header: &mut Option<Header>,
     plen: usize,
     options: u32,
-    mut dnamebuff: Vec<u8>,
-    servers: Option<Box<option::Server>>,
+    mut dnamebuff: &mut Vec<u8>,
+    servers: &mut Option<Box<option::Server>>,
     last_server: Option<Box<option::Server>>,
     now: SystemTime,
     local_ttl: u64,
