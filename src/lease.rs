@@ -34,9 +34,9 @@ pub struct DhcpLease {
 
 pub fn lease_init(
     filename: Option<&str>,
-    domain: Option<String>,
-    _buff: Vec<u8>,
-    _buff2: Vec<u8>,
+    domain: &mut Option<String>,
+    _buff: &mut Vec<u8>,
+    _buff2: &mut Vec<u8>,
     now: SystemTime,
     dhcp_configs: &mut Option<Box<DhcpConfig>>,
 ) -> i32 {
@@ -412,5 +412,6 @@ pub fn lease_set_expires(lease: &mut Option<Box<DhcpLease>>, exp: u64) {
         lease.expires = exp;
     }
 }
+
 
  

@@ -46,7 +46,7 @@
      header: &Option<Header>,
      qlen: usize,
      name: &mut [u8],
-     baddr: Option<Box<BogusAddr>>,
+     baddr: &mut Option<Box<BogusAddr>>,
      now: SystemTime,
      caches: &mut Cache,
  ) -> bool {
@@ -733,12 +733,12 @@
      header: &mut Option<Header>,
      limit: &mut [u8],
      qlen: u32,
-     mxname: Option<String>,
-     mxtarget: Option<String>,
+     mxname: &mut Option<String>,
+     mxtarget: &mut Option<String>,
      options: u32,
      now: SystemTime,
      local_ttl: u64,
-     mut name: Vec<u8>,
+     mut name: &mut Vec<u8>,
      caches: &mut Cache,
  ) -> i32 {
      let mut addr: Vec<u8> = vec![0; 16];
@@ -815,11 +815,11 @@
          if qclass == C_CHAOS {
              if qtype == T_TXT {
                  if hostname_isequal(name_str, "version.bind") {
-                     name = format!("dnsmasq-{}", VERSION).as_bytes().to_vec();
+                     *name = format!("utdnsmasq-{}", VERSION).as_bytes().to_vec();
                  } else if hostname_isequal(name_str, "authors.bind") {
-                     name = b"Simon Kelley".to_vec();
+                     *name = b"Simon Kelley".to_vec();
                  } else {
-                     name = vec![0];
+                     *name = vec![0];
                  }
  
                  let len = name.len();

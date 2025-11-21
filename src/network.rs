@@ -92,55 +92,67 @@ pub fn add_iface(
     except: &mut Option<Box<Iname>>, // 名称黑名单
 ) -> Option<String> {
     let mut tmp: Option<Box<Iname>> = None;
-
     // 检查名称白名单
-    if names.is_some() {
-        tmp = names.clone();
-        while let Some(mut current_name) = tmp.clone() {
-            // 使用 take 方法
-            match current_name.name {
-                Some(cur_name) => {
-                    if cur_name == name {
-                        current_name.found = true;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            tmp = current_name.next.clone();
-        }
+    if let Some(ref mut head) = names {
+        let mut current = head;
 
-        if flags & 0x8 == 0 && tmp.is_some() {
-            return None;
+        loop {
+            if let Some(cur_name) = &current.name {
+                if cur_name == name {
+                    current.found = true;
+                    break;
+                }
+            }
+
+            if let Some(ref mut next) = current.next {
+                current = next;
+            } else {
+                break;
+            }
         }
     }
 
-    if addrs.is_some() {
-        tmp = addrs.clone();
-        while let Some(mut current_addr) = tmp.clone() {
-            if sockaddr_isequal(&current_addr.addr, addr) {
-                current_addr.found = true;
-                println!(" current_addr.found is true");
+    if flags & 0x8 == 0 && names.as_ref().map_or(true, |n| n.found == false) {
+        return None;
+    }
+
+    if let Some(ref mut head) = addrs {
+        let mut current = head;
+
+        loop {
+            if sockaddr_isequal(&current.addr, addr) {
+                current.found = true;
                 break;
             }
-            tmp = current_addr.next.clone();
-        }
 
-        if tmp.is_none() {
-            return None;
+            if let Some(ref mut next) = current.next {
+                current = next;
+            } else {
+                break;
+            }
         }
+    }
+
+    if addrs.as_ref().map_or(true, |n| n.found == false) {
+        return None;
     }
 
     // 检查黑名单
-    if except.is_some() {
-        tmp = except.clone();
-        while let Some(mut current) = tmp.clone() {
-            if let Some(cur_name) = current.name {
+    if let Some(ref mut head) = except {
+        let mut current = head;
+
+        loop {
+            if let Some(ref cur_name) = current.name {
                 if cur_name == name {
                     return None;
                 }
             }
-            tmp = current.next.clone();
+
+            if let Some(ref mut next) = current.next {
+                current = next;
+            } else {
+                break;
+            }
         }
     }
 
@@ -456,30 +468,30 @@ pub fn enumerate_interfaces(
             }
         }
     }
-    let mut prev: *mut Option<Box<Irec>> = interfacep; // 前置节点，使用裸指针避免借用冲突
-    while let Some(mut current_iface) = unsafe { (*prev).clone() } {
-        if current_iface.valid {
-            // 如果节点有效，继续遍历
-            prev = &mut current_iface.next as *mut _; // 更新前置节点为当前节点的 next
-            unsafe {
-                (*prev) = Some(current_iface); // 将当前节点放回链表
-            }
-        } else {
-            // 如果节点无效，处理文件描述符
-            if current_iface.fd > 0 {
-                if let Err(e) = nix::unistd::close(current_iface.fd) {
-                    eprintln!("Failed to close fd {}: {}", current_iface.fd, e);
-                }
-            }
-            reap_forward(current_iface.fd); // 清理挂起的请求
+    // let mut prev: *mut Option<Box<Irec>> = interfacep; // 前置节点，使用裸指针避免借用冲突
+    // while let Some(mut current_iface) = unsafe { (*prev).clone() } {
+    //     if current_iface.valid {
+    //         // 如果节点有效，继续遍历
+    //         prev = &mut current_iface.next as *mut _; // 更新前置节点为当前节点的 next
+    //         unsafe {
+    //             (*prev) = Some(current_iface); // 将当前节点放回链表
+    //         }
+    //     } else {
+    //         // 如果节点无效，处理文件描述符
+    //         if current_iface.fd > 0 {
+    //             if let Err(e) = nix::unistd::close(current_iface.fd) {
+    //                 eprintln!("Failed to close fd {}: {}", current_iface.fd, e);
+    //             }
+    //         }
+    //         reap_forward(current_iface.fd); // 清理挂起的请求
 
-            // 提取当前节点的 next 并重新链接链表
-            let next = current_iface.next.clone();
-            unsafe {
-                *prev = next; // 更新前置节点的 next
-            }
-        }
-    }
+    //         // 提取当前节点的 next 并重新链接链表
+    //         let next = current_iface.next.clone();
+    //         unsafe {
+    //             *prev = next; // 更新前置节点的 next
+    //         }
+    //     }
+    // }
     Ok(())
 }
 
@@ -627,26 +639,33 @@ pub fn allocate_sfd(
 
 // 从配置文件中重新加载 DNS 服务器列表，并更新现有的服务器链表
 pub fn reload_servers(
-    fname: Option<Box<ResolvC>>,
-    mut serv: Option<Box<Server>>,
-    query_port: i32,
+    fname: &mut Option<Box<ResolvC>>,
+    serv: &mut Option<Box<Server>>,
+    query_port: &mut i32,
 ) -> Option<Box<Server>> {
-    let mut old_servers = Vec::new();
+    let mut old_servers: Option<Box<Server>> = None;
     let mut new_servers: Option<Box<Server>> = None;
 
     // 将旧服务器放入可重用列表中
-    while let Some(mut server) = serv.clone() {
-        serv = server.next.clone(); // 获取下一个节点
-        if server.flags & SERV_FROM_RESOLV != 0 {
-            old_servers.push(server); // 将匹配的放入旧服务器队列
+    while let Some(mut current) = serv.take() {
+        let next = mem::replace(&mut current.next, None); // 获取下一个节点并断开当前节点的链接
+        *serv = next; // 更新 serv 到下一个节点
+
+        if current.flags & SERV_FROM_RESOLV != 0 {
+            // 将匹配的服务器放入 old_servers 链表
+            current.next = old_servers.take(); // 将当前节点的 next 设置为 old_servers
+            old_servers = Some(current); // 更新 old_servers 为当前节点
         } else {
-            server.next = new_servers.clone();
-            new_servers = Some(server); // 保留非匹配服务器
+            // 保留非匹配的服务器，放入 new_servers 链表
+            current.next = new_servers.take(); // 将当前节点的 next 设置为 new_servers
+            new_servers = Some(current); // 更新 new_servers 为当前节点
         }
     }
 
     // 如果没有提供 fname 或其中没有文件名，则返回现有的服务器列表
-    let file_path = match fname.and_then(|resolv| resolv.name) {
+    let file_path = match <Option<Box<option::ResolvC>> as Clone>::clone(&fname)
+        .and_then(|resolv| resolv.name)
+    {
         Some(path) => path,
         None => {
             syslog!(LOG_INFO, "No file path specified in ResolvC struct",);
@@ -696,7 +715,7 @@ pub fn reload_servers(
                 MySockAddr {
                     in_: SockAddrIn {
                         sin_family: AF_INET,
-                        sin_port: query_port as u16,
+                        sin_port: *query_port as u16,
                         sin_addr: option::InAddr { s_addr: 0 },
                         sin_zero: [0; 8],
                     },
@@ -718,7 +737,7 @@ pub fn reload_servers(
                 MySockAddr {
                     in6: SockAddrIn6 {
                         sin6_family: AF_INET6,
-                        sin6_port: query_port as u16,
+                        sin6_port: *query_port as u16,
                         sin6_flowinfo: 0,
                         sin6_addr: option::In6Addr { s6_addr: [0; 16] },
                         sin6_scope_id: 0,
@@ -729,25 +748,23 @@ pub fn reload_servers(
             continue;
         };
 
-        // 重用旧服务器或创建新服务器
-        let mut server = if let Some(mut old_server) = old_servers.pop() {
-            old_server.addr = addr;
-            old_server.source_addr = source_addr;
-            old_server
-        } else {
-            Box::new(Server {
-                addr,
-                source_addr,
-                sfd: None,
-                domain: None,
-                flags: SERV_FROM_RESOLV,
-                next: None,
-            })
-        };
+        if let Some(first_old) = old_servers.take() {
+            *serv = Some(first_old);
+            if let Some(ref mut serv_inner) = serv.as_mut() {
+                old_servers = mem::replace(&mut serv_inner.next, None);
+            }
+        }
 
-        // 插入新服务器链表的头部
-        server.next = new_servers.clone();
-        new_servers = Some(Box::new(*server));
+        new_servers = serv.take();
+
+        if let Some(ref mut serv_inner) = new_servers {
+            serv_inner.next = None;
+            serv_inner.addr = addr;
+            serv_inner.source_addr = source_addr;
+            serv_inner.domain = None;
+            serv_inner.sfd = None;
+            serv_inner.flags = SERV_FROM_RESOLV;
+        }
     }
 
     new_servers
