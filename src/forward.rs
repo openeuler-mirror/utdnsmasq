@@ -361,12 +361,12 @@ pub fn send_query(fd: i32, header: &[u8], addr: SocketAddr) -> Result<(), std::i
 // 提取ip地址和端口
 pub fn extract_socket_addr(addr: &MySockAddr) -> SocketAddr {
     unsafe {
-        if addr.sa.sa_family == libc::AF_INET as u16 {
+        if addr.sa.sa_family == AF_INET as u16 {
             let ipv4 = addr.in_;
             let ip = std::net::Ipv4Addr::from(ipv4.sin_addr.s_addr.to_be());
             let port = u16::from_be(ipv4.sin_port);
             SocketAddr::new(std::net::IpAddr::V4(ip), port)
-        } else if addr.sa.sa_family == libc::AF_INET6 as u16 {
+        } else if addr.sa.sa_family == AF_INET6 as u16 {
             let ipv6 = addr.in6;
             let ip = std::net::Ipv6Addr::from(ipv6.sin6_addr.s6_addr);
             let port = u16::from_be(ipv6.sin6_port);
@@ -444,7 +444,7 @@ pub fn get_new_frec(now: SystemTime) -> Option<Box<FRec>> {
             new_id: 0,
             fd: -1,
             time: now,
-            next: FREC_LIST.take(),
+            next: FREC_LIST.clone(),
         });
 
         // 更新链表头
