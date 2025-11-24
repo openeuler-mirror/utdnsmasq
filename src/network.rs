@@ -9,11 +9,11 @@ use libc::INADDR_ANY;
 use nix::errno::Errno;
 use nix::libc::ioctl;
 use nix::sys::socket::sockopt::{Broadcast, ReuseAddr};
-use nix::sys::socket::{bind, setsockopt, socket, AddressFamily, SockFlag, SockProtocol, SockType};
+use nix::sys::socket::{setsockopt, socket, AddressFamily, SockFlag, SockProtocol, SockType};
 use util::*;
 
 use std::ffi::CString;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Error};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::unix::io::AsRawFd; // 用于获取文件描述符
 
@@ -462,6 +462,27 @@ pub fn enumerate_interfaces(
                         // 设置 SO_BROADCAST
                         setsockopt(&sock_fd, Broadcast, &opt)
                             .map_err(|e| format!("failed to set SO_BROADCAST: {}", e))?;
+                        let raw_fd = sock_fd.as_raw_fd();
+                        let mut saddr_ref_c: libc::sockaddr_in = std::mem::zeroed(); // 初始化 全为0
+                        if let Some(s) = saddr {
+                            saddr_ref_c.sin_family = s.sin_family;
+                            saddr_ref_c.sin_port = s.sin_port;
+                            saddr_ref_c.sin_addr.s_addr = s.sin_addr.s_addr;
+                        }
+
+                        let saddr_size =
+                            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+                        let res = libc::bind(
+                            raw_fd,
+                            &saddr_ref_c as *const _ as *const libc::sockaddr,
+                            saddr_size,
+                        );
+                        if res < 0 {
+                            return Err(format!(
+                                "failed to bind DHCP server socket: {}",
+                                Error::last_os_error()
+                            ));
+                        }
                     }
                 }
             }
