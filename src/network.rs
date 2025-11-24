@@ -91,7 +91,6 @@ pub fn add_iface(
     addrs: &mut Option<Box<Iname>>,  // 地址白名单
     except: &mut Option<Box<Iname>>, // 名称黑名单
 ) -> Option<String> {
-    let mut tmp: Option<Box<Iname>> = None;
     // 检查名称白名单
     if let Some(ref mut head) = names {
         let mut current = head;
@@ -468,30 +467,28 @@ pub fn enumerate_interfaces(
             }
         }
     }
-    // let mut prev: *mut Option<Box<Irec>> = interfacep; // 前置节点，使用裸指针避免借用冲突
-    // while let Some(mut current_iface) = unsafe { (*prev).clone() } {
-    //     if current_iface.valid {
-    //         // 如果节点有效，继续遍历
-    //         prev = &mut current_iface.next as *mut _; // 更新前置节点为当前节点的 next
-    //         unsafe {
-    //             (*prev) = Some(current_iface); // 将当前节点放回链表
-    //         }
-    //     } else {
-    //         // 如果节点无效，处理文件描述符
-    //         if current_iface.fd > 0 {
-    //             if let Err(e) = nix::unistd::close(current_iface.fd) {
-    //                 eprintln!("Failed to close fd {}: {}", current_iface.fd, e);
-    //             }
-    //         }
-    //         reap_forward(current_iface.fd); // 清理挂起的请求
+    let mut prev = None;
+    let mut binding = interfacep.clone();
+    let mut iface = binding.as_deref_mut();
+    while let Some(iface_ref) = iface {
+        if iface_ref.valid {
+            prev = Some(iface_ref.clone());
+            iface = iface_ref.next.as_deref_mut();
+        } else {
+            unsafe {
+                libc::close(iface_ref.fd);
+                reap_forward(iface_ref.fd);
+            }
 
-    //         // 提取当前节点的 next 并重新链接链表
-    //         let next = current_iface.next.clone();
-    //         unsafe {
-    //             *prev = next; // 更新前置节点的 next
-    //         }
-    //     }
-    // }
+            if let Some(ref mut prev_ref) = prev {
+                prev_ref.next = iface_ref.next.clone();
+            } else {
+                *interfacep = iface_ref.next.clone();
+            }
+
+            iface = iface_ref.next.as_deref_mut();
+        }
+    }
     Ok(())
 }
 
