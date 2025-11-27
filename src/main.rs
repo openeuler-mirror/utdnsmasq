@@ -164,7 +164,7 @@
  const IFBPF: &str = "/usr/include/linux/bpf.h";
  const OPT_DEBUG: u32 = 64;
  const LEASEFILE: &str = "/var/lib/misc/dnsmasq.leases";
- const VERSION: &str = "2.0";
+ const VERSION: &str = "0.0.2";
  const OPT_NO_POLL: u32 = 32;
  const OPT_LOG: u32 = 4;
  const F_QUERY: u32 = 8192;
