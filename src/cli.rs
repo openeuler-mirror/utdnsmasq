@@ -194,7 +194,7 @@ fn display_usage() {
 
 /* 帮助信息 */
 const USAGE: &str = r#"
-Usage: dnsmasq [options]
+Usage: utdnsmasq [options]
 Valid options are :
     listen-address=ipaddr         Specify local address(es) to listen on.
     address=/domain/ipaddr        Return ipaddr for all hosts in specified domains.
@@ -233,7 +233,7 @@ Valid options are :
     mx-target=host_name           Specify the host in an MX reply.
     local-ttl=time                Specify time-to-live in seconds for replies from /etc/hosts.
     user=username                 Change to this user after startup. (defaults to " CHUSER ").
-    version                       Display dnsmasq version.
+    version                       Display utdnsmasq version.
     help                          Display this message.
     pid-file=path                 Specify path of PID file. (defaults to " RUNFILE ").
 "#;
