@@ -425,7 +425,7 @@ pub fn enumerate_interfaces(
                 let broadcast = (*sockaddr_in_ptr).sin_addr;
 
                 let mut context = dhcp.as_mut();
-                while let Some(ref mut ctx) = context {
+                while let Some(ctx) = context {
                     if ctx.iface.is_empty()
                         && (addr.in_.sin_addr.s_addr & netmask.s_addr)
                             == (ctx.start.s_addr & netmask.s_addr)
@@ -484,6 +484,7 @@ pub fn enumerate_interfaces(
                             ));
                         }
                     }
+                    context = ctx.next.as_mut();
                 }
             }
         }
@@ -787,4 +788,3 @@ pub fn reload_servers(
 
     new_servers
 }
-
