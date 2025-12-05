@@ -381,9 +381,10 @@ pub fn read_opts(
         /* 去除注释、空格、等多余字符 */
         let re = regex::Regex::new(r"[ |\t]").unwrap();
         let line_vec: Vec<&str> = re.split(&line).filter(|s| !s.is_empty()).collect();
-        if line_vec.len() == 0 {
+        if line_vec.len() <= 0 {
             continue;
         }
+
         let line_val = line_vec[0];
 
         /* 获取option 和 value */

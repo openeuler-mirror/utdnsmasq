@@ -339,29 +339,33 @@ fn main() {
     let mut caches = Cache::new(cachesize, options & 4);
     // 检查DHCP配置并验证必要的文件是否存在
     if dhcp.is_some() {
-        let mut current = &dhcp;
-        while let Some(ctx) = current {
-            if ctx.iface.is_empty() {
-                let ctx_start = ctx.start;
-                syslog!(
-                    LOG_ERR,
-                    "********* No suitable interface for DHCP service at address{:?}",
-                    ctx_start
-                );
+        let packet_path = IFPACKET;
+        let bpf_path = IFBPF;
+        if file_exists(packet_path) && file_exists(bpf_path) {
+            let mut current = &dhcp;
+            while let Some(ctx) = current {
+                if ctx.iface.is_empty() {
+                    // 如果 iface 为空字符串，执行后续代码块
+                    // die("********* No suitable interface for DHCP service at address", inet_ntoa(dhcp_tmp->start));
+                    let _leasefd = lease_init(
+                        lease_file.as_ref().map(|s| s.as_str()),
+                        &mut domain_suffix,
+                        &mut dnamebuff,
+                        &mut packet,
+                        SystemTime::now(),
+                        &mut dhcp_conf,
+                    );
+                    let _ = lease_update_dns(&mut caches, 1);
+                }
+
                 // 移动到下一个节点
                 current = &ctx.next;
             }
-            let _leasefd = lease_init(
-                lease_file.as_ref().map(|s| s.as_str()),
-                &mut domain_suffix,
-                &mut dnamebuff,
-                &mut packet,
-                SystemTime::now(),
-                &mut dhcp_conf,
-            );
-            let _ = lease_update_dns(&mut caches, 1);
+        } else {
+            die("********* no DHCP support available on this OS.", "");
         }
     }
+
     if (options & OPT_DEBUG) == 0 {
         let _pidfile: Option<File> = match File::create("pidfile.txt") {
             Ok(file) => Some(file),
@@ -506,6 +510,7 @@ fn main() {
     while !SIGTERM_FLAG.load(Ordering::Relaxed) {
         // 创建 Poll 实例
         let mut poll = Poll::new().expect("无法创建 Poll 实例");
+
         // 创建一个容量为 128 的 Events 集合，类似于 fd_set
         let mut events = Events::with_capacity(128);
         // fd_set events;
@@ -518,15 +523,16 @@ fn main() {
                 addn_hosts.as_ref().map(|x| x.to_string()),
             );
             let _ = lease_update_dns(&mut caches, 1);
-            if resolv.is_some() && (options & OPT_NO_POLL != 0) {
-                servers = check_servers(
-                    reload_servers(&mut resolv, &mut servers, &mut query_port),
-                    &interfaces,
-                    &mut sfds,
-                );
-                SIGHUP_FLAG.store(false, Ordering::SeqCst);
-            }
         }
+        if resolv.is_some() && (options & OPT_NO_POLL) != 0 {
+            servers = check_servers(
+                reload_servers(&mut resolv, &mut servers, &mut query_port),
+                &interfaces,
+                &mut sfds,
+            );
+            SIGHUP_FLAG.store(false, Ordering::SeqCst);
+        }
+
         if SIGUSR1_FLAG.load(Ordering::SeqCst) {
             dump_cache(
                 (options & (OPT_DEBUG | OPT_LOG)).try_into().unwrap(),
@@ -554,9 +560,11 @@ fn main() {
             }
             SIGUSR2_FLAG.store(false, Ordering::SeqCst);
         }
+
         if !first_loop {
             // 用于跟踪最大文件描述符
             let mut maxfd = 0;
+
             // 遍历链表，将每个文件描述符注册到 Poll 中
             let mut serverfdp = sfds.as_deref();
             while let Some(server) = serverfdp {
