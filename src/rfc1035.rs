@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use crate::util::*;
+use crate::util::*;
 use crate::*;
 use byteorder::{ByteOrder, NetworkEndian};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -1372,5 +1372,3 @@ pub fn extract_request(header: &Option<Header>, qlen: u32, name: &mut Vec<u8>) -
 
 //     p_copy.len()
 // }
-
- 
