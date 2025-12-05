@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use crate::lease::*;
+use crate::lease::*;
 use crate::util::*;
 use crate::*;
 
@@ -685,5 +685,3 @@ fn option_uint(opt: &[u8]) -> u32 {
 
     ret
 }
-
- 

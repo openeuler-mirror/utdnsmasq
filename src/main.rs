@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- pub mod cache;
+pub mod cache;
 pub mod cli;
 pub mod dhcp;
 pub mod forward;
@@ -22,6 +22,7 @@ use cli::parse_args;
 use dhcp::*;
 use forward::*;
 use lease::*;
+use libc::{getpwnam, passwd};
 use logs::*;
 use mio::net::UdpSocket as MioUdpSocket;
 use mio::unix::SourceFd;
@@ -32,6 +33,8 @@ use nix::sys::stat::{umask, Mode};
 use nix::unistd::{
     chdir, close, fork, geteuid, getuid, setgid, setsid, setuid, ForkResult, Gid, Uid,
 };
+use std::ffi::CString;
+
 use option::*;
 use pnet::util::Octets;
 use rfc1035::*;
@@ -425,40 +428,34 @@ fn main() {
 
         let username_str: &str = username.as_str(); // 获取用户名字符串  将string类型转换为&str类型
         let groupname_str: &str = groupname.as_str();
-        if Some(username_str).is_some() {
-            // 获取用户信息
-            if let Some(user) = get_user_by_name(username_str) {
-                // 设置组ID
-                if Some(groupname_str).is_some() {
-                    if let Some(group) = get_group_by_name(groupname_str) {
-                        let gid = Gid::from_raw(group.gid());
-                        // 设置组ID
-                        if let Err(_e) = setgid(gid) {
-                            die("Failed to set group ID: {}", &gid.to_string());
-                        }
-                    } else {
-                        die("Group not found: {}", groupname_str);
-                    }
-                } else {
-                    // 如果没有提供组名，则使用用户的主组
-                    let primary_gid = Gid::from_raw(user.primary_group_id());
-                    if let Err(_e) = setgid(primary_gid) {
-                        die("Failed to set group ID: {}", &primary_gid.to_string());
-                    }
-                }
+        unsafe {
+            let c_username = CString::new(username_str).expect("CString::new failed");
+            let username_ptr: *const libc::c_char = c_username.as_ptr();
+            let c_groupname = CString::new(groupname_str).expect("CString::new failed");
+            let groupname_ptr: *const libc::c_char = c_groupname.as_ptr();
 
-                // 最后，设置用户ID
-                if let Err(_e) = setuid(Uid::from_raw(user.uid())) {
-                    die("Failed to set user ID: {}", &user.uid().to_string());
+            let mut ent_pw: *mut passwd = 0 as *mut passwd;
+            // 改变用户和组 ID
+            if !username.is_empty() && {
+                ent_pw = getpwnam(username_ptr);
+                !ent_pw.is_null()
+            } {
+                let mut dummy: libc::gid_t = 0;
+                let mut gp: *mut libc::group = 0 as *mut libc::group;
+                libc::setgroups(0 as libc::c_int as libc::size_t, &mut dummy);
+                if !groupname.is_empty() && {
+                    gp = libc::getgrnam(groupname_ptr);
+                    !gp.is_null()
+                } || {
+                    gp = libc::getgrgid((*ent_pw).pw_gid);
+                    !gp.is_null()
+                } {
+                    libc::setgid((*gp).gr_gid);
                 }
-            } else {
-                die("User not found: {}", username_str);
+                libc::setuid((*ent_pw).pw_uid);
             }
-        } else {
-            die("Username cannot be None", "");
         }
     }
-
     if Some(cachesize).is_some() {
         syslog!(
             LOG_INFO,
@@ -503,10 +500,8 @@ fn main() {
     if getuid().is_root() || geteuid().is_root() {
         syslog!(LOG_WARNING, "failed to drop root privs for user",);
     }
-
     let mut servers = check_servers(serv_addrs, &interfaces, &mut sfds);
     let mut last_server = servers.clone();
-
     while !SIGTERM_FLAG.load(Ordering::Relaxed) {
         // 创建 Poll 实例
         let mut poll = Poll::new().expect("无法创建 Poll 实例");
@@ -677,7 +672,6 @@ fn main() {
                     .expect("无法恢复信号掩码");
             }
         }
-
         first_loop = false;
 
         if last.map_or(true, |last_time| {

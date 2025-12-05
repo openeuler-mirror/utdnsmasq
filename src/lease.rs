@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use crate::*;
+use crate::*;
 use cache::*;
 use dhcp::find_config;
 use std::fs::{File, OpenOptions};
@@ -412,6 +412,3 @@ pub fn lease_set_expires(lease: &mut Option<Box<DhcpLease>>, exp: u64) {
         lease.expires = exp;
     }
 }
-
-
- 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use hostname;
+use hostname;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead};
@@ -1166,4 +1166,3 @@ fn is_decimal<T: std::str::FromStr>(s: &str) -> Option<T> {
 fn is_valid_char(c: char) -> bool {
     c == '.' || c.is_whitespace() || c.is_ascii_digit()
 }
-

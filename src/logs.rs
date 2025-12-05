@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
- use colored::*;
+use colored::*;
 use std::borrow::Cow;
 use tklog::{LOG, MODE};
 
@@ -100,6 +100,3 @@ macro_rules! die {
         panic!($message, $arg1);
     }};
 }
-
-
- 
