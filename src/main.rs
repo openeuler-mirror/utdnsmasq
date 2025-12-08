@@ -19,6 +19,7 @@ pub mod util;
 use byteorder::{ByteOrder, NetworkEndian};
 use cache::*;
 use cli::parse_args;
+use daemonize::Daemonize;
 use dhcp::*;
 use forward::*;
 use lease::*;
@@ -167,7 +168,7 @@ const IFPACKET: &str = "/usr/include/netpacket/packet.h";
 const IFBPF: &str = "/usr/include/linux/bpf.h";
 const OPT_DEBUG: u32 = 64;
 const LEASEFILE: &str = "/var/lib/misc/dnsmasq.leases";
-const VERSION: &str = "0.0.2";
+const VERSION: &str = "0.0.3";
 const OPT_NO_POLL: u32 = 32;
 const OPT_LOG: u32 = 4;
 const F_QUERY: u32 = 8192;
@@ -370,92 +371,31 @@ fn main() {
     }
 
     if (options & OPT_DEBUG) == 0 {
-        let _pidfile: Option<File> = match File::create("pidfile.txt") {
-            Ok(file) => Some(file),
-            Err(_) => None,
-        };
-        // 进程守护化
-        let _ = daemonize();
-        // 将进程的当前工作目录切换到根目录是守护进程通常的操作，避免锁定文件系统
-        let _ = chdir("/");
-        // 确保创建的文件权限符合系统和应用的安全要求
-        umask(Mode::from_bits_truncate(0o022));
-        if let Some(runfile) = runfile {
-            // 打开文件用于写入 pid
-            if let Ok(mut pidfile) = File::create(runfile) {
-                // 获取当前进程 ID 并写入文件
-                let pid = process::id();
-                if writeln!(pidfile, "{}", pid).is_err() {
-                    eprintln!("Failed to write pid to file");
-                }
-            } else {
-                eprintln!("Failed to open runfile for writing");
-            }
-        }
-
-        // 设置文件权限掩码为 0
-        umask(Mode::from_bits_truncate(0));
-        // 根据特定条件关闭未被占用的文件描述符
-        // 通过安全的数据结构管理和迭代器遍历来实现对文件描述符的查找和关闭，确保只关闭那些未被占用的文件描述符，同时避免了可能的内存不安全问题。
-        for i in 0..64 {
-            let mut iface_tmp = &interfaces;
-            while let Some(ref iface) = iface_tmp {
-                if iface.fd == i {
-                    break;
-                }
-                iface_tmp = &iface.next;
-            }
-
-            if iface_tmp.is_some() {
-                continue;
-            }
-            let mut dhcp_tmp = &dhcp;
-            while let Some(ref dhcp_entry) = dhcp_tmp {
-                if dhcp_entry.fd == i && dhcp_entry.rawfd == i {
-                    break;
-                }
-                dhcp_tmp = &dhcp_entry.next;
-            }
-            if dhcp_tmp.is_some() {
-                continue;
-            }
-
-            if dhcp.is_some() && i == leasefd {
-                continue;
-            }
-            let _ = close(i);
-        }
-
         let username_str: &str = username.as_str(); // 获取用户名字符串  将string类型转换为&str类型
         let groupname_str: &str = groupname.as_str();
-        unsafe {
-            let c_username = CString::new(username_str).expect("CString::new failed");
-            let username_ptr: *const libc::c_char = c_username.as_ptr();
-            let c_groupname = CString::new(groupname_str).expect("CString::new failed");
-            let groupname_ptr: *const libc::c_char = c_groupname.as_ptr();
 
-            let mut ent_pw: *mut passwd = 0 as *mut passwd;
-            // 改变用户和组 ID
-            if !username.is_empty() && {
-                ent_pw = getpwnam(username_ptr);
-                !ent_pw.is_null()
-            } {
-                let mut dummy: libc::gid_t = 0;
-                let mut gp: *mut libc::group = 0 as *mut libc::group;
-                libc::setgroups(0 as libc::c_int as libc::size_t, &mut dummy);
-                if !groupname.is_empty() && {
-                    gp = libc::getgrnam(groupname_ptr);
-                    !gp.is_null()
-                } || {
-                    gp = libc::getgrgid((*ent_pw).pw_gid);
-                    !gp.is_null()
-                } {
-                    libc::setgid((*gp).gr_gid);
-                }
-                libc::setuid((*ent_pw).pw_uid);
-            }
+        let runfile = match runfile {
+            Some(t) => t,
+            None => String::from("/var/run/utdnsmasq.pid"),
+        };
+
+        let daemonize = Daemonize::new()
+            .pid_file(runfile)
+            .working_directory("/")
+            .umask(0o022)
+            .user(username_str)
+            .group(groupname_str)
+            .chown_pid_file(false)
+            .privileged_action(|| {
+                nix::unistd::setgroups(&[]).unwrap(); // 清除附加组
+            });
+
+        match daemonize.start() {
+            Ok(_) => println!("success, daemonize"),
+            Err(e) => println!("Error, {}", e),
         }
     }
+
     if Some(cachesize).is_some() {
         syslog!(
             LOG_INFO,
