@@ -164,12 +164,12 @@ mod tests {
     use super::*;
     #[test]
     fn test_hostname_isequal() {
-        assert_eq!(hostname_isequal("Rust", "rust"), true);
-        assert_eq!(hostname_isequal("Rust", "Rust"), true);
-        assert_eq!(hostname_isequal("Rust", "rusty"), false);
-        assert_eq!(hostname_isequal("Rust", "Ru"), false);
-        assert_eq!(hostname_isequal("Rust", "r"), false);
-        assert_eq!(hostname_isequal("R", "r"), true);
+        assert!(hostname_isequal("Rust", "rust"));
+        assert!(hostname_isequal("Rust", "Rust"));
+        assert!(!hostname_isequal("Rust", "rusty"));
+        assert!(!hostname_isequal("Rust", "Ru"));
+        assert!(!hostname_isequal("Rust", "r"));
+        assert!(hostname_isequal("R", "r"));
     }
 
     #[test]

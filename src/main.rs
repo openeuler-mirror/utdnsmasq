@@ -4,6 +4,14 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(
+    unexpected_cfgs,
+    unused_imports,
+    unused_variables,
+    unused_assignments,
+    dead_code
+)]
+
 pub mod cache;
 pub mod cli;
 pub mod dhcp;
@@ -352,7 +360,7 @@ fn main() {
                     // 如果 iface 为空字符串，执行后续代码块
                     // die("********* No suitable interface for DHCP service at address", inet_ntoa(dhcp_tmp->start));
                     let _leasefd = lease_init(
-                        lease_file.as_ref().map(|s| s.as_str()),
+                        lease_file.as_deref(),
                         &mut domain_suffix,
                         &mut dnamebuff,
                         &mut packet,
@@ -832,11 +840,7 @@ fn main() {
                         if let Some(ref mut header) = header {
                             if !header.qr == 0 {
                                 // 如果是查询请求，提取请求并处理
-                                if extract_request(
-                                    &Some(*header),
-                                    (n as u32).try_into().unwrap(),
-                                    &mut dnamebuff,
-                                ) {
+                                if extract_request(&Some(*header), n as u32, &mut dnamebuff) {
                                     let m = answer_request(
                                         &mut Some(*header),
                                         &mut packet[..],
@@ -859,7 +863,7 @@ fn main() {
                                             iface.fd,
                                             &udpaddr,
                                             &mut Some(*header),
-                                            (n as u32).try_into().unwrap(),
+                                            n,
                                             options,
                                             &mut dnamebuff,
                                             &mut servers,

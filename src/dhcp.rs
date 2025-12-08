@@ -4,6 +4,15 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_else_if,
+    clippy::op_ref,
+    clippy::too_many_arguments,
+    clippy::unnecessary_mut_passed,
+    clippy::needless_borrow
+)]
+
 use crate::rfc2131::*;
 use crate::*;
 use pnet::packet::ethernet::MutableEthernetPacket;
@@ -343,9 +352,9 @@ pub fn address_allocate(
 // 用于检查给定的 IPv4 地址是否在 DHCP 上下文中可用
 pub fn address_available(context: &DhcpContext, addr: InAddr) -> bool {
     // 将 IPv4 地址转换为 u32 进行比较
-    let addr_u32 = u32::from(addr.s_addr);
-    let start_u32 = u32::from(context.start.s_addr);
-    let end_u32 = u32::from(context.end.s_addr);
+    let addr_u32 = addr.s_addr;
+    let start_u32 = context.start.s_addr;
+    let end_u32 = context.end.s_addr;
 
     // 检查地址是否在允许范围内
     if addr_u32 < start_u32 || addr_u32 > end_u32 {

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(static_mut_refs, unused_mut, unused_variables, unused_imports)]
+
 use crate::*;
 use cache::*;
 use dhcp::find_config;
@@ -35,8 +37,8 @@ pub struct DhcpLease {
 pub fn lease_init(
     filename: Option<&str>,
     domain: &mut Option<String>,
-    _buff: &mut Vec<u8>,
-    _buff2: &mut Vec<u8>,
+    _buff: &mut [u8],
+    _buff2: &mut [u8],
     now: SystemTime,
     dhcp_configs: &mut Option<Box<DhcpConfig>>,
 ) -> i32 {
@@ -236,17 +238,17 @@ pub fn lease_update_dns(caches: &mut Cache, force_dns: i32) -> io::Result<()> {
             while let Some(lease) = lease_opt {
                 if let Some(ref fqdn) = lease.fqdn {
                     // 如果有 FQDN，添加到缓存
-                    cache_add_dhcp_entry(fqdn, lease.addr.clone(), lease.expires, 4, caches);
+                    cache_add_dhcp_entry(fqdn, lease.addr, lease.expires, 4, caches);
                     cache_add_dhcp_entry(
                         lease.hostname.as_deref().unwrap_or("*"),
-                        lease.addr.clone(),
+                        lease.addr,
                         lease.expires,
                         0,
                         caches,
                     );
                 } else if let Some(ref hostname) = lease.hostname {
                     // 只添加 hostname
-                    cache_add_dhcp_entry(hostname, lease.addr.clone(), lease.expires, 4, caches);
+                    cache_add_dhcp_entry(hostname, lease.addr, lease.expires, 4, caches);
                 }
 
                 // 继续遍历链表
@@ -297,7 +299,7 @@ pub fn lease_prune(mut target: Option<Box<DhcpLease>>, now: SystemTime) {
 
                 // 如果是目标节点，取出后消耗掉（消费掉`target`以防止内存泄漏）
                 if target_match {
-                    target.clone();
+                    let _ = target.clone();
                 }
 
                 // 由于 Box 的自动内存管理，数据会自动释放

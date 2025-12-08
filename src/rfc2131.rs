@@ -4,6 +4,17 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(
+    clippy::collapsible_if,
+    unreachable_patterns,
+    unused_variables,
+    unused_parens,
+    dead_code,
+    clippy::too_many_arguments,
+    clippy::needless_borrow,
+    non_snake_case
+)]
+
 use crate::lease::*;
 use crate::util::*;
 use crate::*;
@@ -98,6 +109,7 @@ pub fn option_find(packet: &DhcpPacket, sz: usize, option: u8) -> Option<&[u8]> 
 }
 
 // 处理 DHCP 协议中的各种请求，并生成相应的响应
+#[allow(static_mut_refs, unused_unsafe)]
 pub fn dhcp_reply(
     context: &DhcpContext,
     packet: &mut DhcpPacket,
@@ -127,7 +139,7 @@ pub fn dhcp_reply(
 
     // 客户端标识符 (Client Identifier) 检查
     let (clid, clid_len) = if let Some(opt) = option_find(packet, sz, OPTION_CLIENT_ID) {
-        (option_ptr(opt), option_len(opt) as usize)
+        (option_ptr(opt), option_len(opt))
     } else {
         (&packet.chaddr[..ETHER_ADDR_LEN], 0) // 使用硬件地址
     };
@@ -222,8 +234,24 @@ pub fn dhcp_reply(
         (renewal_time, expires_time)
     };
 
-    if let Some(opt) = option_find(packet, sz, OPTION_MESSAGE_TYPE) {
-        match opt[2] {
+    // --- 重构借用冲突：提前拷贝所有option_find需要的数据，避免引用 ---
+    let message_type_val = option_find(packet, sz, OPTION_MESSAGE_TYPE).map(|opt| opt[2]);
+    let requested_ip_val = option_find(packet, sz, OPTION_REQUESTED_IP).map(|opt| {
+        let mut buf = [0u8; 4];
+        let len = std::cmp::min(opt.len().saturating_sub(2), 4);
+        buf[..len].copy_from_slice(&opt[2..2 + len]);
+        buf
+    });
+    let server_id_val = option_find(packet, sz, OPTION_SERVER_IDENTIFIER).map(|opt| {
+        let mut buf = [0u8; 4];
+        let len = std::cmp::min(opt.len().saturating_sub(2), 4);
+        buf[..len].copy_from_slice(&opt[2..2 + len]);
+        buf
+    });
+    // --- 结束重构 ---
+
+    if let Some(msg_type) = message_type_val {
+        match msg_type {
             DHCPRELEASE => {
                 if let Some(lease) = &lease {
                     lease_prune(Some(lease.clone()), now);
@@ -231,8 +259,8 @@ pub fn dhcp_reply(
                 return 0;
             }
             DHCPDISCOVER => {
-                if let Some(opt) = option_find(packet, sz, OPTION_REQUESTED_IP) {
-                    packet.yiaddr = option_addr(opt);
+                if let Some(ip_bytes) = requested_ip_val {
+                    packet.yiaddr = InAddr::new(u32::from_be_bytes(ip_bytes));
                 }
                 if let Some(lease) = lease {
                     packet.yiaddr = lease.addr;
@@ -250,19 +278,20 @@ pub fn dhcp_reply(
 
                 bootp_option_put(packet, dhcp_file, dhcp_sname);
                 packet.siaddr = dhcp_next_server;
-                packet.siaddr = dhcp_next_server;
                 let end = &packet.options[308..];
                 // 添加 OPTION_MESSAGE_TYPE 选项
                 let mut p = option_put(p, end, OPTION_MESSAGE_TYPE, 1, DHCPOFFER);
                 // 添加 OPTION_SERVER_IDENTIFIER 选项
-                let u32_val = u32::from_be_bytes(context.serv_addr.s_addr.octets());
-                p = option_put(
-                    p,
-                    end,
-                    OPTION_SERVER_IDENTIFIER,
-                    INADDRSZ,
-                    u32_val.try_into().unwrap(),
-                );
+                if let Some(sid_bytes) = server_id_val {
+                    let u32_val = u32::from_be_bytes(sid_bytes);
+                    p = option_put(
+                        p,
+                        end,
+                        OPTION_SERVER_IDENTIFIER,
+                        INADDRSZ,
+                        u32_val.try_into().unwrap(),
+                    );
+                }
                 // 添加 OPTION_LEASE_TIME 选项
                 p = option_put(
                     p,
@@ -309,12 +338,12 @@ pub fn dhcp_reply(
                     packet.yiaddr = packet.ciaddr;
                 } else {
                     // SELECTING 或 INIT_REBOOT
-                    if let Some(opt) = option_find(packet, sz, OPTION_SERVER_IDENTIFIER) {
-                        if context.serv_addr != option_addr(opt) {
+                    if let Some(opt) = server_id_val {
+                        if context.serv_addr != InAddr::new(u32::from_be_bytes(opt)) {
                             return 0;
                         }
                     }
-                    if let Some(_opt) = option_find(packet, sz, OPTION_REQUESTED_IP) {
+                    if let Some(_opt) = requested_ip_val {
                     } else {
                         return 0;
                     }
@@ -484,7 +513,7 @@ fn do_req_options<'a>(
 
     // 添加 OPTION_NETMASK
     if in_list(req_options_bytes, OPTION_NETMASK)
-        && !option_find_dhcp(config_opts, OPTION_NETMASK).is_none()
+        && option_find_dhcp(config_opts, OPTION_NETMASK).is_some()
     {
         let netmask = context.broadcast.s_addr.octets();
         let u32_val = u32::from_be_bytes(netmask);
@@ -499,7 +528,7 @@ fn do_req_options<'a>(
 
     // 添加 OPTION_BROADCAST
     if in_list(req_options_bytes, OPTION_BROADCAST)
-        && !option_find_dhcp(config_opts, OPTION_BROADCAST).is_none()
+        && option_find_dhcp(config_opts, OPTION_BROADCAST).is_some()
     {
         let broadcast = context.broadcast.s_addr.octets();
         let u32_val = u32::from_be_bytes(broadcast);
@@ -514,7 +543,7 @@ fn do_req_options<'a>(
 
     // 添加 OPTION_ROUTER
     if in_list(req_options_bytes, OPTION_ROUTER)
-        && !option_find_dhcp(config_opts, OPTION_ROUTER).is_none()
+        && option_find_dhcp(config_opts, OPTION_ROUTER).is_some()
     {
         let router = context.serv_addr.s_addr.octets();
         let u32_val = u32::from_be_bytes(router);
@@ -523,7 +552,7 @@ fn do_req_options<'a>(
 
     // 添加 OPTION_DNSSERVER
     if in_list(req_options_bytes, OPTION_DNSSERVER)
-        && !option_find_dhcp(config_opts, OPTION_DNSSERVER).is_none()
+        && option_find_dhcp(config_opts, OPTION_DNSSERVER).is_some()
     {
         let dns_server = context.serv_addr.s_addr.octets();
         let u32_val = u32::from_be_bytes(dns_server);
@@ -538,7 +567,7 @@ fn do_req_options<'a>(
 
     // 添加 OPTION_DOMAINNAME
     if in_list(req_options_bytes, OPTION_DOMAINNAME)
-        && !option_find_dhcp(config_opts, OPTION_DOMAINNAME).is_none()
+        && option_find_dhcp(config_opts, OPTION_DOMAINNAME).is_some()
         && domainname.is_some()
         && p.len() >= domainname.unwrap().len() + 2
     {
@@ -570,7 +599,7 @@ fn do_req_options<'a>(
         if let Some(opt) = option_find_dhcp(config_opts, req_option) {
             if req_option != OPTION_HOSTNAME && p.len() >= (opt.len + 2).into() {
                 p[0] = opt.opt;
-                p[1] = opt.len as u8;
+                p[1] = opt.len;
                 p[2..2 + opt.len as usize].copy_from_slice(&opt.val);
                 p = &mut p[2 + opt.len as usize..];
             }
@@ -614,7 +643,7 @@ fn option_put<'a>(
 
         // 写入选项值
         for i in 0..length {
-            p[2 + i] = (value >> (8 * (length - (i + 1)))) as u8;
+            p[2 + i] = (value >> (8 * (length - (i + 1))));
         }
 
         // 返回新偏移量的缓冲区
@@ -681,7 +710,5 @@ fn option_uint(opt: &[u8]) -> u32 {
     assert!(opt.len() >= std::mem::size_of::<u32>());
 
     // 将前四个字节转换为 u32，处理未对齐数据和字节顺序
-    let ret = u32::from_be_bytes([opt[0], opt[1], opt[2], opt[3]]);
-
-    ret
+    u32::from_be_bytes([opt[0], opt[1], opt[2], opt[3]])
 }

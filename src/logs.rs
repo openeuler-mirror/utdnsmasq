@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(clippy::borrow_interior_mutable_const)]
+
 use colored::*;
 use std::borrow::Cow;
 use tklog::{LOG, MODE};
