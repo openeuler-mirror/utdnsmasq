@@ -246,17 +246,17 @@ pub const SERV_FOR_NODOTS: u32 = 32; /* server for names with no domain part onl
 pub const SERV_TYPE: u32 = SERV_HAS_DOMAIN | SERV_FOR_NODOTS;
 
 pub const OPT_BOGUSPRIV: u32 = 1;
-const OPT_FILTER: u32 = 2;
-const OPT_LOG: u32 = 4;
+pub const OPT_FILTER: u32 = 2;
+pub const OPT_LOG: u32 = 4;
 pub const OPT_SELFMX: u32 = 8;
-const OPT_NO_HOSTS: u32 = 16;
-const OPT_NO_POLL: u32 = 32;
-const OPT_DEBUG: u32 = 64;
+pub const OPT_NO_HOSTS: u32 = 16;
+pub const OPT_NO_POLL: u32 = 32;
+pub const OPT_DEBUG: u32 = 64;
 pub const OPT_ORDER: u32 = 128;
-const OPT_NO_RESOLV: u32 = 256;
-const OPT_EXPAND: u32 = 512;
+pub const OPT_NO_RESOLV: u32 = 256;
+pub const OPT_EXPAND: u32 = 512;
 pub const OPT_LOCALMX: u32 = 1024;
-const OPT_NO_NEG: u32 = 2048;
+pub const OPT_NO_NEG: u32 = 2048;
 pub const OPT_NODOTS_LOCAL: u32 = 4096;
 
 struct Optflags<'a> {
@@ -561,6 +561,7 @@ pub fn read_opts(
                         name: None,
                         next: if_addrs.clone(),
                     };
+
                     // 将配置文件地址转为换ip地址
                     let ipaddr = inet_pton(optarg);
                     if let Some(ip) = ipaddr {
@@ -568,19 +569,31 @@ pub fn read_opts(
                             IpAddr::V4(ipv4) => {
                                 // 将 IPv4 地址转换为网络字节序的 u32
                                 let binary_format = u32::from(ipv4).to_be();
-                                new.addr.in_.sin_addr = InAddr::new(binary_format);
-                                new.addr.sa.sa_family = 2; // AF_INET
+                                new.addr = MySockAddr {
+                                    in_: SockAddrIn {
+                                        sin_family: AF_INET as SaFamilyT,
+                                        sin_port: 0,
+                                        sin_addr: InAddr::new(binary_format),
+                                        sin_zero: [0; 8],
+                                    },
+                                };
                             }
                             IpAddr::V6(ipv6) => {
                                 let binary_format = ipv6.octets();
-                                new.addr.in6.sin6_addr = In6Addr::new(binary_format);
-                                new.addr.sa.sa_family = 10; // AF_INET6
-                                new.addr.in6.sin6_flowinfo = 0;
+                                new.addr = MySockAddr {
+                                    in6: SockAddrIn6 {
+                                        sin6_family: AF_INET6 as SaFamilyT,
+                                        sin6_port: 0,
+                                        sin6_flowinfo: 0,
+                                        sin6_addr: In6Addr::new(binary_format),
+                                        sin6_scope_id: 0,
+                                    },
+                                };
                             }
                         }
                     }
 
-                    *if_addrs = Some(Box::new(new.clone()));
+                    *if_addrs = Some(Box::new(new));
                 }
 
                 // S A

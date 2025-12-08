@@ -40,29 +40,51 @@ pub fn log_init() {
 
 #[macro_export]
 macro_rules! syslog {
-    ($priority:expr, $fmt:expr, $($args:tt),*) => {{
-        match $priority {
-            LOG_EMERG | LOG_ALERT |LOG_CRIT => {
-                log::error!($fmt, $($args),*);
-            }
-            LOG_ERR => {
-                log::error!($fmt, $($args),*);
-            }
-            LOG_WARNING => {
-                log::warn!($fmt, $($args),*);
-            }
-            LOG_NOTICE | LOG_INFO => {
-                log::info!($fmt, $($args),*);
-            }
-            LOG_DEBUG => {
-                log::debug!($fmt, $($args),*);
-            }
-            _ => {
-                log::debug!($fmt, $($args),*);
-            }
-        }
-    }};
-}
+     ($priority:expr, $fmt:expr) => {{
+         match $priority {
+             LOG_EMERG | LOG_ALERT |LOG_CRIT => {
+                 log::error!($fmt);
+             }
+             LOG_ERR => {
+                 log::error!($fmt);
+             }
+             LOG_WARNING => {
+                 log::warn!($fmt);
+             }
+             LOG_NOTICE | LOG_INFO => {
+                 log::info!($fmt);
+             }
+             LOG_DEBUG => {
+                 log::debug!($fmt);
+             }
+             _ => {
+                 log::debug!($fmt);
+             }
+         }
+     }};
+     ($priority:expr, $fmt:expr, $($args:tt),*) => {{
+         match $priority {
+             LOG_EMERG | LOG_ALERT |LOG_CRIT => {
+                 log::error!($fmt, $($args),*);
+             }
+             LOG_ERR => {
+                 log::error!($fmt, $($args),*);
+             }
+             LOG_WARNING => {
+                 log::warn!($fmt, $($args),*);
+             }
+             LOG_NOTICE | LOG_INFO => {
+                 log::info!($fmt, $($args),*);
+             }
+             LOG_DEBUG => {
+                 log::debug!($fmt, $($args),*);
+             }
+             _ => {
+                 log::debug!($fmt, $($args),*);
+             }
+         }
+     }};
+ }
 
 pub fn complain(message: &str, arg1: &str) {
     let errmess = std::io::Error::last_os_error().to_string();
@@ -83,7 +105,7 @@ pub fn complain(message: &str, arg1: &str) {
 // 第二个参数为NULL时，调用die函数。
 pub fn die(message: &str, arg1: &str) {
     complain(message, arg1);
-    syslog!(LOG_CRIT, "FAILED to start up",);
+    syslog!(LOG_CRIT, "FAILED to start up");
     panic!("{}", message);
 }
 
@@ -98,7 +120,7 @@ macro_rules! die {
         }
         eprintln!($message, $arg1);
         syslog!(LOG_CRIT, $message, $arg1);
-        syslog!(LOG_CRIT, "FAILED to start up",);
+        syslog!(LOG_CRIT, "FAILED to start up");
         panic!($message, $arg1);
     }};
 }
