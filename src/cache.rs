@@ -24,6 +24,7 @@ use std::io::{self, BufRead};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ptr::null_mut;
 use std::str;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -50,7 +51,7 @@ pub const F_NXDOMAIN: u32 = 0x08;
 const F_SERVER: u32 = 0x80;
 const F_QUERY: u32 = 0x100;
 static mut INSERT_ERROR: bool = false;
-static mut ADDN_FILE: Option<String> = None;
+static ADDN_FILE: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AllAddr {
@@ -232,7 +233,7 @@ pub fn cache_reload(
     // 如果有 OPT_NO_HOSTS 选项且没有附加 hosts 文件
     if (opts & OPT_NO_HOSTS != 0) && addn_hosts.is_none() {
         if caches.cache_size > 0 {
-            complain("Cleared cache", "");
+            println!("Cleared cache");
         }
         return;
     }
@@ -257,7 +258,7 @@ pub fn cache_reload(
         ) {
             complain("Error reading additional hosts file: {}", &err.to_string());
         }
-        unsafe { ADDN_FILE = Some(addn_hosts) };
+        let _ = ADDN_FILE.set(addn_hosts);
     }
 }
 
@@ -1169,12 +1170,13 @@ pub fn log_query(caches: &mut Cache, flags: u32, name: &[u8], addr: Option<&[u8]
     if flags & F_DHCP != 0 {
         source = "DHCP";
     } else if flags & F_HOSTS != 0 {
-        unsafe {
-            if flags & F_ADDN != 0 {
-                source = ADDN_FILE.as_deref().unwrap_or("default_file");
-            } else {
-                source = HOSTSFILE;
-            }
+        if flags & F_ADDN != 0 {
+            source = ADDN_FILE
+                .get()
+                .map(|s| s.as_str())
+                .unwrap_or("default_file");
+        } else {
+            source = HOSTSFILE;
         }
     } else if flags & F_CONFIG != 0 {
         source = "config";

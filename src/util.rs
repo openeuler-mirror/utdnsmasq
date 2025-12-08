@@ -102,19 +102,13 @@ pub fn safe_string_alloc(cp: &str) -> *mut i8 {
 // }
 pub fn sockaddr_isequal(s1: &MySockAddr, s2: &MySockAddr) -> bool {
     unsafe {
-        // println!(
-        //     "xxxxxxxxxxxxxxxxxxxxxs1.in_.sin_addr.sin_addr={:?}  ",
-        //     s1.in_.sin_addr
-        // );
-        // println!(
-        //     "xxxxxxxxxxxxxxxxxxxxxs2.in_.sin_addr.sin_addr={:?}  ",
-        //     s2.in_.sin_addr
-        // );
-        // println!("xxxxxxxxxxxxxxxxxxxxxs1.in_.sin_portr={:?}  ", s1.in_.sin_port);
-        // println!("xxxxxxxxxxxxxxxxxxxxxs2.in_.sin_port={:?}  ", s2.in_.sin_port);
         if s1.sa.sa_family == s2.sa.sa_family {
             match s1.sa.sa_family {
-                AF_INET => s1.in_.sin_port == s2.in_.sin_port && s1.in_.sin_addr == s2.in_.sin_addr,
+                AF_INET => {
+                    let addr_match = s1.in_.sin_addr == s2.in_.sin_addr;
+                    let port_match = s1.in_.sin_port == s2.in_.sin_port;
+                    addr_match && port_match
+                }
                 AF_INET6 => {
                     s1.in6.sin6_port == s2.in6.sin6_port
                         && s1.in6.sin6_flowinfo == s2.in6.sin6_flowinfo

@@ -197,6 +197,7 @@ pub fn add_iface(
 
     // 获取文件描述符
     let fd = socket.as_raw_fd();
+
     // 设置允许多个套接字绑定到同一个地址和端口
     unsafe {
         let optval: i32 = 1; // 启用 SO_REUSEPORT
@@ -209,15 +210,29 @@ pub fn add_iface(
         );
     }
 
+    // 检查文件描述符是否有效
+    let is_valid = fd >= 0 && {
+        // 尝试获取文件状态来验证fd是否有效
+        use libc::{fcntl, F_GETFD};
+        unsafe { fcntl(fd, F_GETFD) != -1 }
+    };
+
+    if !is_valid {
+        return Some("无效的文件描述符".to_string());
+    }
+
     // 分配新的接口并添加到链表中
     let new_iface = Box::new(Irec {
         addr: *addr,
         fd,                 // 使用文件描述符
-        valid: true,        // 设置为true表示有效
+        valid: is_valid,    // 只有在文件描述符有效时才设置为true
         next: list.clone(), // 将原来的链表连接到新节点
     });
 
     *list = Some(new_iface);
+
+    // 重要：不要让socket在这里被销毁，因为我们需要保持文件描述符打开
+    std::mem::forget(socket);
     None
 }
 
@@ -528,30 +543,23 @@ pub fn check_servers(
     while let Some(ref mut server) = new {
         let addr_str = match unsafe { server.addr.sa.sa_family } {
             AF_INET => {
-                // IPv4
+                // IPv4 - 正确格式化IP地址
                 let addr = unsafe { server.addr.in_ };
-                format!("{}:{}", addr.sin_addr.s_addr, addr.sin_port)
+                let ip_addr = Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+                format!("{}:{}", ip_addr, u16::from_be(addr.sin_port))
             }
             AF_INET6 => {
-                // IPv6
+                // IPv6 - 正确格式化IPv6地址
                 let addr = unsafe { server.addr.in6 };
-                format!(
-                    "{}:{}",
-                    addr.sin6_addr
-                        .s6_addr
-                        .iter()
-                        .map(|b| format!("{:x}", b))
-                        .collect::<Vec<_>>()
-                        .join(":"),
-                    addr.sin6_port
-                )
+                let ip_addr = Ipv6Addr::from(addr.sin6_addr.s6_addr);
+                format!("[{}]:{}", ip_addr, u16::from_be(addr.sin6_port))
             }
             _ => continue,
         };
 
         let port = match unsafe { server.addr.sa.sa_family } {
-            AF_INET => unsafe { server.addr.in_.sin_port },
-            AF_INET6 => unsafe { server.addr.in6.sin6_port },
+            AF_INET => u16::from_be(unsafe { server.addr.in_.sin_port }),
+            AF_INET6 => u16::from_be(unsafe { server.addr.in6.sin6_port }),
             _ => continue,
         };
 
@@ -725,7 +733,7 @@ pub fn reload_servers(
                 MySockAddr {
                     in_: SockAddrIn {
                         sin_family: AF_INET,
-                        sin_port: NAMESERVER_PORT,
+                        sin_port: NAMESERVER_PORT.to_be(), // 转换为网络字节序
                         sin_addr: option::InAddr {
                             s_addr: u32::from(ipv4_addr).to_be(),
                         },
@@ -735,7 +743,7 @@ pub fn reload_servers(
                 MySockAddr {
                     in_: SockAddrIn {
                         sin_family: AF_INET,
-                        sin_port: *query_port as u16,
+                        sin_port: (*query_port as u16).to_be(), // 转换为网络字节序
                         sin_addr: option::InAddr { s_addr: 0 },
                         sin_zero: [0; 8],
                     },
@@ -746,7 +754,7 @@ pub fn reload_servers(
                 MySockAddr {
                     in6: SockAddrIn6 {
                         sin6_family: AF_INET6,
-                        sin6_port: NAMESERVER_PORT,
+                        sin6_port: NAMESERVER_PORT.to_be(), // 转换为网络字节序
                         sin6_flowinfo: 0,
                         sin6_addr: option::In6Addr {
                             s6_addr: ipv6_addr.octets(),
@@ -757,7 +765,7 @@ pub fn reload_servers(
                 MySockAddr {
                     in6: SockAddrIn6 {
                         sin6_family: AF_INET6,
-                        sin6_port: *query_port as u16,
+                        sin6_port: (*query_port as u16).to_be(), // 转换为网络字节序
                         sin6_flowinfo: 0,
                         sin6_addr: option::In6Addr { s6_addr: [0; 16] },
                         sin6_scope_id: 0,

@@ -10,7 +10,7 @@ use std::process;
 
 #[derive(Debug, Parser)]
 #[command(version, long_about = None, disable_help_flag = true, disable_version_flag = true)]
-struct Cli {
+pub struct Cli {
     /// Specify local address(es) to listen on.
     #[arg(short = 'a', long = "listen-address", value_name = "ipaddr", action = ArgAction::Append)]
     pub listen_address: Option<Vec<String>>,
@@ -172,7 +172,7 @@ struct Cli {
     pub pid_file: Option<String>,
 }
 
-pub fn parse_args() {
+pub fn parse_args() -> Cli {
     let cli = Cli::parse();
 
     /* -w --help 显示帮助 */
@@ -186,6 +186,8 @@ pub fn parse_args() {
         println!("utdnsmasq version {}", VERSION);
         process::exit(0);
     }
+
+    cli
 }
 
 fn display_usage() {
