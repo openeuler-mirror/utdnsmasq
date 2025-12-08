@@ -3,6 +3,18 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+#![allow(
+    clippy::collapsible_if,
+    static_mut_refs,
+    unused_mut,
+    unused_unsafe,
+    unused_variables,
+    unused_assignments,
+    clippy::too_many_arguments,
+    clippy::missing_safety_doc,
+    clippy::map_identity
+)]
+
 use crate::rfc1035::*;
 use crate::util::*;
 use crate::*;
@@ -91,7 +103,7 @@ pub fn reply_query(
                         && header.rcode == NOERROR
                         && check_for_bogus_wildcard(
                             &header_option,
-                            n as usize,
+                            n,
                             dnamebuff,
                             bogus_nxdomain,
                             now,
@@ -99,9 +111,9 @@ pub fn reply_query(
                         ))
                     {
                         if header.rcode == NOERROR && header.ancount != 0 {
-                            extract_addresses(caches, &header_option, n as usize, dnamebuff, now);
+                            extract_addresses(caches, &header_option, n, dnamebuff, now);
                         } else if (options & OPT_NO_NEG) == 0 {
-                            extract_neg_addrs(caches, &header_option, n as usize, dnamebuff, now);
+                            extract_neg_addrs(caches, &header_option, n, dnamebuff, now);
                         }
                     }
                 }
@@ -161,7 +173,7 @@ pub unsafe fn forward_query(
     let mut type_ = 0;
 
     // 提取请求中的信息
-    let gotname = extract_request(header, plen.try_into().unwrap(), &mut dnamebuff);
+    let gotname = extract_request(header, plen.try_into().unwrap(), dnamebuff);
 
     let header = match header {
         Some(ref mut hdr) => hdr, // 如果存在，解引用
@@ -170,7 +182,7 @@ pub unsafe fn forward_query(
             return None;
         }
     };
-    let header_bytes = header_to_bytes(header.clone());
+    let header_bytes = header_to_bytes(*header);
     // 递归未启用或没有可用服务器
     if header.rd == 0 || servers.is_none() {
         forward = None;
@@ -262,9 +274,8 @@ pub unsafe fn forward_query(
                 fwd.sentto = last_server.clone();
             }
 
-            fwd.source = udp_addr.clone();
+            fwd.source = *udp_addr;
             fwd.new_id = get_id(); // 生成新 ID
-            fwd.fd = udp_socket;
             fwd.orig_id = header.id;
             header.id = fwd.new_id; // 更新 header 的 ID
         }
@@ -361,12 +372,14 @@ pub fn send_query(fd: i32, header: &[u8], addr: SocketAddr) -> Result<(), std::i
 // 提取ip地址和端口
 pub fn extract_socket_addr(addr: &MySockAddr) -> SocketAddr {
     unsafe {
-        if addr.sa.sa_family == AF_INET as u16 {
-            let ipv4 = addr.in_;
-            let ip = std::net::Ipv4Addr::from(ipv4.sin_addr.s_addr.to_be());
-            let port = u16::from_be(ipv4.sin_port);
+        if addr.sa.sa_family == AF_INET {
+            // IPv4 地址
+            let addr_in = unsafe { addr.in_ };
+            let addr_u32 = NetworkEndian::read_u32(&addr_in.sin_addr.s_addr.to_be_bytes());
+            let ip = Ipv4Addr::from(addr_u32);
+            let port = u16::from_be(addr_in.sin_port);
             SocketAddr::new(std::net::IpAddr::V4(ip), port)
-        } else if addr.sa.sa_family == AF_INET6 as u16 {
+        } else if addr.sa.sa_family == AF_INET6 {
             let ipv6 = addr.in6;
             let ip = std::net::Ipv6Addr::from(ipv6.sin6_addr.s6_addr);
             let port = u16::from_be(ipv6.sin6_port);

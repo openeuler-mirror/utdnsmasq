@@ -11,7 +11,7 @@ libc = "0.2"
 signal-hook = "0.3"
 if-addrs = "0.6"
 nix = { version = "0.29", features = ["term", "signal", "fs", "socket", "user", "net"] }
-daemonize = "0.4"
+daemonize = "0.5"
 users = "0.11"
 log = "0.4.22"
 tklog = "0.2.4"

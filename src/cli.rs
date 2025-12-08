@@ -194,46 +194,46 @@ fn display_usage() {
 
 /* 帮助信息 */
 const USAGE: &str = r#"
-Usage: utdnsmasq [options]
-Valid options are :
-    listen-address=ipaddr         Specify local address(es) to listen on.
-    address=/domain/ipaddr        Return ipaddr for all hosts in specified domains.
-    bogus-priv                    Fake reverse lookups for RFC1918 private address ranges.
-    bogus-nxdomain=ipaddr         Treat ipaddr as NXDOMAIN (defeats Verisign wildcard).
-    cache-size=cachesize          Specify the size of the cache in entries (defaults to %d).
-    conf-file=path                Specify configuration file (defaults to " CONFFILE ").
-    no-daemon                     Do NOT fork into the background: run in debug mode.
-    domain-needed                 Do NOT forward queries with no domain part.
-    selfmx                        Return self-pointing MX records for local hosts.
-    expand-hosts                  Expand simple names in /etc/hosts with domain-suffix.
-    filterwin2k                   Don't forward spurious DNS requests from Windows hosts.
-    dhcp-range=ipaddr,ipaddr,time Enable DHCP in the range given with lease duration.
-    group=groupname               Change to this group after startup (defaults to " CHGRP ").
-    dhcp-host=<hostspec>          Set address or hostname for a specified machine.
-    no-hosts                      Do NOT load " HOSTSFILE " file.
-    addn-hosts=path               Specify a hosts file to be read in addition to " HOSTSFILE ".
-    interface=interface           Specify interface(s) to listen on.
-    except-interface=int          Specify interface(s) NOT to listen on.
-    dhcp-leasefile=path           Specify where to store DHCP leases (defaults to " LEASEFILE ").
-    localmx                       Return MX records for local hosts.
-    mx-host=host_name             Specify the MX name to reply to.
-    dhcp-boot=<bootp opts>        Specify BOOTP options to DHCP server.
-    no-poll                       Do NOT poll " RESOLVFILE " file, reload only on SIGHUP.
-    no-negcache                   Do NOT cache failed search results.
-    strict-order                  Use nameservers strictly in the order given in " RESOLVFILE ".
-    dhcp-option=<optspec>         Set extra options to be set to DHCP clients.
-    port=number                   Specify port to listen for DNS requests on (defaults to 53).
-    log-queries                   Log queries.
-    query-port=number             Force the originating port for upstream queries.
-    no-resolv                     Do NOT read resolv.conf.
-    resolv-file=path              Specify path to resolv.conf (defaults to " RESOLVFILE ").
-    server=/domain/ipaddr         Specify address(es) of upstream servers with optional domains.
-    local=/domain/                Never forward queries to specified domains.
-    domain=domain                 Specify the domain to be assigned in DHCP leases.
-    mx-target=host_name           Specify the host in an MX reply.
-    local-ttl=time                Specify time-to-live in seconds for replies from /etc/hosts.
-    user=username                 Change to this user after startup. (defaults to " CHUSER ").
-    version                       Display utdnsmasq version.
-    help                          Display this message.
-    pid-file=path                 Specify path of PID file. (defaults to " RUNFILE ").
-"#;
+ Usage: utdnsmasq [options]
+ Valid options are :
+     listen-address=ipaddr         Specify local address(es) to listen on.
+     address=/domain/ipaddr        Return ipaddr for all hosts in specified domains.
+     bogus-priv                    Fake reverse lookups for RFC1918 private address ranges.
+     bogus-nxdomain=ipaddr         Treat ipaddr as NXDOMAIN (defeats Verisign wildcard).
+     cache-size=cachesize          Specify the size of the cache in entries (defaults to %d).
+     conf-file=path                Specify configuration file (defaults to " CONFFILE ").
+     no-daemon                     Do NOT fork into the background: run in debug mode.
+     domain-needed                 Do NOT forward queries with no domain part.
+     selfmx                        Return self-pointing MX records for local hosts.
+     expand-hosts                  Expand simple names in /etc/hosts with domain-suffix.
+     filterwin2k                   Don't forward spurious DNS requests from Windows hosts.
+     dhcp-range=ipaddr,ipaddr,time Enable DHCP in the range given with lease duration.
+     group=groupname               Change to this group after startup (defaults to " CHGRP ").
+     dhcp-host=<hostspec>          Set address or hostname for a specified machine.
+     no-hosts                      Do NOT load " HOSTSFILE " file.
+     addn-hosts=path               Specify a hosts file to be read in addition to " HOSTSFILE ".
+     interface=interface           Specify interface(s) to listen on.
+     except-interface=int          Specify interface(s) NOT to listen on.
+     dhcp-leasefile=path           Specify where to store DHCP leases (defaults to " LEASEFILE ").
+     localmx                       Return MX records for local hosts.
+     mx-host=host_name             Specify the MX name to reply to.
+     dhcp-boot=<bootp opts>        Specify BOOTP options to DHCP server.
+     no-poll                       Do NOT poll " RESOLVFILE " file, reload only on SIGHUP.
+     no-negcache                   Do NOT cache failed search results.
+     strict-order                  Use nameservers strictly in the order given in " RESOLVFILE ".
+     dhcp-option=<optspec>         Set extra options to be set to DHCP clients.
+     port=number                   Specify port to listen for DNS requests on (defaults to 53).
+     log-queries                   Log queries.
+     query-port=number             Force the originating port for upstream queries.
+     no-resolv                     Do NOT read resolv.conf.
+     resolv-file=path              Specify path to resolv.conf (defaults to " RESOLVFILE ").
+     server=/domain/ipaddr         Specify address(es) of upstream servers with optional domains.
+     local=/domain/                Never forward queries to specified domains.
+     domain=domain                 Specify the domain to be assigned in DHCP leases.
+     mx-target=host_name           Specify the host in an MX reply.
+     local-ttl=time                Specify time-to-live in seconds for replies from /etc/hosts.
+     user=username                 Change to this user after startup. (defaults to " CHUSER ").
+     version                       Display utdnsmasq version.
+     help                          Display this message.
+     pid-file=path                 Specify path of PID file. (defaults to " RUNFILE ").
+ "#;

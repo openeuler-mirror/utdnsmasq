@@ -4,6 +4,19 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(
+    unused_variables,
+    unused_assignments,
+    clippy::no_effect,
+    clippy::needless_borrow,
+    clippy::manual_is_ascii_check,
+    clippy::unnecessary_cast,
+    clippy::clone_on_copy,
+    clippy::explicit_auto_deref,
+    clippy::missing_safety_doc,
+    clippy::manual_unwrap_or
+)]
+
 use crate::util::*;
 use crate::*;
 use std::fs::File;

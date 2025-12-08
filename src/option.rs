@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(
+    clippy::redundant_field_names,
+    unused_assignments,
+    clippy::too_many_arguments,
+    clippy::absurd_extreme_comparisons
+)]
+
 use hostname;
 use std::fmt;
 use std::fs::File;
@@ -417,7 +424,7 @@ pub fn read_opts(
             }
         }
 
-        if option != "" {
+        if !option.is_empty() {
             match option {
                 // C
                 "conf-file" => {
@@ -462,11 +469,7 @@ pub fn read_opts(
                 // c
                 "cache-size" => {
                     let mut size: i32 = optarg.parse().unwrap();
-                    if size < 0 {
-                        size = 0;
-                    } else if size > 10000 {
-                        size = 10000;
-                    }
+                    size = size.clamp(0, 10000);
 
                     *cachesize = size as usize;
                 }
@@ -536,7 +539,7 @@ pub fn read_opts(
                 // B
                 "bogus-nxdomain" => {
                     let mut addr: InAddr = InAddr { s_addr: 0 }; // 默认值 暂定为0
-                    let ret = inet_addr(&optarg);
+                    let ret = inet_addr(optarg);
                     match ret {
                         Some(in_addr) => {
                             addr.s_addr = in_addr;
@@ -559,27 +562,21 @@ pub fn read_opts(
                         next: if_addrs.clone(),
                     };
                     // 将配置文件地址转为换ip地址
-                    let ipaddr = inet_pton(&optarg);
-                    match ipaddr {
-                        // 解析地址类型
-                        Some(ip) => {
-                            match ip {
-                                IpAddr::V4(ipv4) => {
-                                    // 将 IPv4 地址转换为网络字节序的 u32
-                                    let binary_format = u32::from(ipv4).to_be();
-                                    new.addr.in_.sin_addr = InAddr::new(binary_format);
-                                    new.addr.sa.sa_family = 2; // AF_INET
-                                }
-                                IpAddr::V6(ipv6) => {
-                                    let binary_format = ipv6.octets();
-                                    new.addr.in6.sin6_addr = In6Addr::new(binary_format);
-                                    new.addr.sa.sa_family = 10; // AF_INET6
-                                    new.addr.in6.sin6_flowinfo = 0;
-                                }
+                    let ipaddr = inet_pton(optarg);
+                    if let Some(ip) = ipaddr {
+                        match ip {
+                            IpAddr::V4(ipv4) => {
+                                // 将 IPv4 地址转换为网络字节序的 u32
+                                let binary_format = u32::from(ipv4).to_be();
+                                new.addr.in_.sin_addr = InAddr::new(binary_format);
+                                new.addr.sa.sa_family = 2; // AF_INET
                             }
-                        }
-                        None => {
-                            option_flag = "?";
+                            IpAddr::V6(ipv6) => {
+                                let binary_format = ipv6.octets();
+                                new.addr.in6.sin6_addr = In6Addr::new(binary_format);
+                                new.addr.sa.sa_family = 10; // AF_INET6
+                                new.addr.in6.sin6_flowinfo = 0;
+                            }
                         }
                     }
 
@@ -675,85 +672,76 @@ pub fn read_opts(
                             }
                         }
 
-                        let ipaddr = inet_pton(&optarg);
-                        match ipaddr {
-                            Some(ip) => {
-                                match ip {
-                                    IpAddr::V4(ipv4) => {
-                                        // 将 IPv4 地址转换为网络字节序的 u32
-                                        let binary_format = u32::from(ipv4).to_be();
-                                        newlist.addr.in_.sin_addr = InAddr::new(binary_format);
-                                        newlist.addr.in_.sin_port = serv_port.to_be();
-                                        newlist.source_addr.in_.sin_port = source_port.to_be();
-                                        newlist.addr.sa.sa_family = AF_INET;
-                                        newlist.source_addr.sa.sa_family = AF_INET;
+                        let ipaddr = inet_pton(optarg);
+                        if let Some(ip) = ipaddr {
+                            match ip {
+                                IpAddr::V4(ipv4) => {
+                                    // 将 IPv4 地址转换为网络字节序的 u32
+                                    let binary_format = u32::from(ipv4).to_be();
+                                    newlist.addr.in_.sin_addr = InAddr::new(binary_format);
+                                    newlist.addr.in_.sin_port = serv_port.to_be();
+                                    newlist.source_addr.in_.sin_port = source_port.to_be();
+                                    newlist.addr.sa.sa_family = AF_INET;
+                                    newlist.source_addr.sa.sa_family = AF_INET;
 
-                                        if !source.is_empty() {
-                                            let ret = inet_pton(source);
-                                            match ret {
-                                                Some(ip) => match ip {
-                                                    IpAddr::V4(ipv4) => {
-                                                        let binary_format = u32::from(ipv4).to_be();
-                                                        newlist.source_addr.in_.sin_addr =
-                                                            InAddr::new(binary_format);
-                                                        newlist.flags |= SERV_HAS_SOURCE;
-                                                    }
-                                                    _ => option_flag = "?",
-                                                },
-                                                None => {}
+                                    if !source.is_empty() {
+                                        let ret = inet_pton(source);
+                                        if let Some(ip) = ret {
+                                            match ip {
+                                                IpAddr::V4(ipv4) => {
+                                                    let binary_format = u32::from(ipv4).to_be();
+                                                    newlist.source_addr.in_.sin_addr =
+                                                        InAddr::new(binary_format);
+                                                    newlist.flags |= SERV_HAS_SOURCE;
+                                                }
+                                                _ => option_flag = "?",
                                             }
-                                        } else {
-                                            newlist.source_addr.in_.sin_addr.s_addr = 0;
-                                            // INADDR_ANY
                                         }
+                                    } else {
+                                        newlist.source_addr.in_.sin_addr.s_addr = 0;
+                                        // INADDR_ANY
                                     }
-                                    IpAddr::V6(ipv6) => {
-                                        let binary_format = ipv6.octets();
-                                        newlist.addr.in6.sin6_addr = In6Addr::new(binary_format);
+                                }
+                                IpAddr::V6(ipv6) => {
+                                    let binary_format = ipv6.octets();
+                                    newlist.addr.in6.sin6_addr = In6Addr::new(binary_format);
 
-                                        newlist.addr.in6.sin6_port = serv_port.to_be();
-                                        newlist.source_addr.in6.sin6_port = source_port.to_be();
-                                        newlist.addr.sa.sa_family = AF_INET6;
-                                        newlist.source_addr.sa.sa_family = AF_INET6;
-                                        newlist.addr.in6.sin6_flowinfo = 0;
-                                        newlist.source_addr.in6.sin6_flowinfo = 0;
+                                    newlist.addr.in6.sin6_port = serv_port.to_be();
+                                    newlist.source_addr.in6.sin6_port = source_port.to_be();
+                                    newlist.addr.sa.sa_family = AF_INET6;
+                                    newlist.source_addr.sa.sa_family = AF_INET6;
+                                    newlist.addr.in6.sin6_flowinfo = 0;
+                                    newlist.source_addr.in6.sin6_flowinfo = 0;
 
-                                        if !source.is_empty() {
-                                            let ret = inet_pton(source);
-                                            match ret {
-                                                Some(ip) => match ip {
-                                                    IpAddr::V6(ipv6) => {
-                                                        let binary_format = ipv6.octets();
-                                                        newlist.source_addr.in6.sin6_addr =
-                                                            In6Addr::new(binary_format);
-                                                        newlist.flags |= SERV_HAS_SOURCE;
-                                                    }
-                                                    _ => option_flag = "?",
-                                                },
-                                                None => {}
+                                    if !source.is_empty() {
+                                        let ret = inet_pton(source);
+                                        if let Some(ip) = ret {
+                                            match ip {
+                                                IpAddr::V6(ipv6) => {
+                                                    let binary_format = ipv6.octets();
+                                                    newlist.source_addr.in6.sin6_addr =
+                                                        In6Addr::new(binary_format);
+                                                    newlist.flags |= SERV_HAS_SOURCE;
+                                                }
+                                                _ => option_flag = "?",
                                             }
-                                        } else {
-                                            newlist.source_addr.in6.sin6_addr =
-                                                In6Addr::new([0; 16]);
-                                            // in6addr_any
                                         }
+                                    } else {
+                                        newlist.source_addr.in6.sin6_addr = In6Addr::new([0; 16]);
+                                        // in6addr_any
                                     }
                                 }
                             }
-                            None => {}
                         }
                     }
 
                     serv = newlist.clone();
                     while serv.next.is_some() {
-                        match serv.next {
-                            Some(ref mut next) => {
-                                next.flags = serv.flags;
-                                next.addr = serv.addr;
-                                next.source_addr = serv.source_addr;
-                                serv = *next.clone();
-                            }
-                            None => {}
+                        if let Some(ref mut next) = serv.next {
+                            next.flags = serv.flags;
+                            next.addr = serv.addr;
+                            next.source_addr = serv.source_addr;
+                            serv = *next.clone();
                         }
                     }
 
@@ -805,12 +793,11 @@ pub fn read_opts(
 
                 // F
                 "dhcp-range" => {
-                    let mut new: DhcpContext = DhcpContext::default();
-
-                    // 将dhcp值赋值给new.next 并将dhcp置为空
-                    new.next = std::mem::replace(dhcp, None);
-
-                    new.lease_time = DEFLEASE; // 默认租约时间
+                    let mut new: DhcpContext = DhcpContext {
+                        next: dhcp.take(),
+                        lease_time: DEFLEASE,
+                        ..Default::default()
+                    };
 
                     if optarg.contains(",") {
                         let mut iter: Vec<&str> = optarg.split(',').collect();
@@ -841,13 +828,13 @@ pub fn read_opts(
                         }
 
                         // 解析租约时间
-                        if iter[2] != "" {
+                        if !iter[2].is_empty() {
                             let opt = iter[2];
                             if opt == "infinite" {
                                 new.lease_time = 0xffffffff;
                             } else {
                                 let mut fac: u32 = 1;
-                                if opt.len() > 0 {
+                                if !opt.is_empty() {
                                     match opt.chars().last() {
                                         Some('h') | Some('H') => fac *= 60 * 60,
                                         Some('m') | Some('M') => fac *= 60,
@@ -880,9 +867,10 @@ pub fn read_opts(
 
                 // G
                 "dhcp-host" => {
-                    let mut new: DhcpConfig = DhcpConfig::default();
-
-                    new.next = dhcp_conf.clone();
+                    let mut new: DhcpConfig = DhcpConfig {
+                        next: dhcp_conf.clone(),
+                        ..Default::default()
+                    };
 
                     // ","分割参数
                     let a: Vec<&str> = optarg.split(',').collect();
@@ -1014,9 +1002,7 @@ pub fn read_opts(
                                     let temp = ip.to_le_bytes();
                                     // 大端序
                                     // let temp = ip.to_be_bytes();
-                                    for i in 0..4 {
-                                        new.val.push(temp[i]); // 添加ip地址
-                                    }
+                                    new.val.extend_from_slice(&temp); // 添加ip地址
                                 }
                                 None => {
                                     option_flag = "?";
@@ -1078,9 +1064,9 @@ pub fn read_opts(
         while let Some(current) = tmp {
             unsafe {
                 if current.flags & SERV_HAS_SOURCE == 0 {
-                    if current.addr.sa.sa_family == AF_INET as u16 {
+                    if current.addr.sa.sa_family == AF_INET {
                         current.source_addr.in_.sin_port = query_port.to_be() as u16;
-                    } else if current.addr.sa.sa_family == AF_INET6 as u16 {
+                    } else if current.addr.sa.sa_family == AF_INET6 {
                         current.source_addr.in6.sin6_port = query_port.to_be() as u16;
                     }
                 }
@@ -1094,9 +1080,9 @@ pub fn read_opts(
 
         while let Some(current) = tmp {
             unsafe {
-                if current.addr.sa.sa_family == AF_INET as u16 {
+                if current.addr.sa.sa_family == AF_INET {
                     current.addr.in_.sin_port = port.to_be();
-                } else if current.addr.sa.sa_family == AF_INET6 as u16 {
+                } else if current.addr.sa.sa_family == AF_INET6 {
                     current.addr.in6.sin6_port = port.to_be();
                 }
             }

@@ -4,6 +4,18 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#![allow(
+    clippy::collapsible_if,
+    unreachable_patterns,
+    unused_variables,
+    unused_assignments,
+    clippy::too_many_arguments,
+    clippy::needless_borrow,
+    clippy::unnecessary_cast,
+    clippy::redundant_closure,
+    clippy::ptr_arg
+)]
+
 use crate::util::*;
 use crate::*;
 use byteorder::{ByteOrder, NetworkEndian};
@@ -57,7 +69,7 @@ pub fn check_for_bogus_wildcard(
     };
 
     // 跳过问题部分
-    let mut p = match skip_questions(&header, qlen) {
+    let mut p = match skip_questions(header, qlen) {
         Some(p) => p,
         None => return false, // 无效的数据包
     };
@@ -71,7 +83,7 @@ pub fn check_for_bogus_wildcard(
             return false; // 无效的数据包
         }
 
-        if p.len() < 10 {
+        if p.is_empty() {
             return false; // 数据包太短
         }
 
@@ -115,7 +127,7 @@ pub fn check_for_bogus_wildcard(
             }
         }
 
-        if p.len() < rdlen {
+        if p.is_empty() {
             return false; // 数据包太短
         }
 
@@ -146,7 +158,7 @@ pub fn skip_questions(header: &Option<Header>, plen: usize) -> Option<&[u8]> {
         std::slice::from_raw_parts(data_ptr, plen.saturating_sub(header_size))
     };
 
-    let mut ansp = &ansp[..];
+    let mut ansp = ansp;
 
     // 遍历所有的问题部分
     for _ in 0..qdcount {
@@ -227,12 +239,12 @@ fn extract_name<'a>(
     let mut p1 = None;
     let mut hops = 0;
 
-    while let Some(&l) = p.get(0) {
+    while let Some(&l) = p.first() {
         p = &p[1..];
         let label_type = l & 0xc0;
 
         if label_type == 0xc0 {
-            if p.len() < 1 || p.as_ptr() as usize - header.as_ptr() as usize + 1 >= plen {
+            if p.is_empty() || p.as_ptr() as usize - header.as_ptr() as usize + 1 >= plen {
                 return false;
             }
             let offset = (((l & 0x3f) as usize) << 8) | p[0] as usize;
@@ -257,7 +269,7 @@ fn extract_name<'a>(
             if !is_extract {
                 return false;
             }
-            if p.len() < 1 {
+            if p.is_empty() {
                 return false;
             }
             let count = if p[0] == 0 { 256 } else { p[0] as usize };
@@ -331,7 +343,7 @@ pub fn extract_addresses(
         None => return,
     };
 
-    let mut p = match skip_questions(&header, qlen) {
+    let mut p = match skip_questions(header, qlen) {
         Some(ptr) => ptr,
         None => return,
     };
@@ -526,7 +538,7 @@ pub fn in_arpa_name_2_addr(name: &[u8], addrr: &mut Vec<u8>) -> u32 {
         addrr.clear();
         addrr.resize(4, 0);
         for (i, label) in labels.iter().enumerate() {
-            if !label.chars().all(|c| c.is_digit(10)) {
+            if !label.chars().all(|c| c.is_ascii_digit()) {
                 return 0;
             }
             let octet: u8 = match label.parse() {
@@ -546,7 +558,7 @@ pub fn in_arpa_name_2_addr(name: &[u8], addrr: &mut Vec<u8>) -> u32 {
             let hex_part = &name_str[3..name_str.len() - 1];
             let mut j = 0;
             for (i, ch) in hex_part.chars().enumerate() {
-                if !ch.is_digit(16) {
+                if !ch.is_ascii_hexdigit() {
                     return 0;
                 }
                 let value = ch.to_digit(16).unwrap() as u8;
@@ -563,7 +575,7 @@ pub fn in_arpa_name_2_addr(name: &[u8], addrr: &mut Vec<u8>) -> u32 {
         } else {
             let mut idx = 15;
             for label in labels.iter().rev() {
-                if label.len() != 1 || !label.chars().all(|c| c.is_digit(16)) {
+                if label.len() != 1 || !label.chars().all(|c| c.is_ascii_hexdigit()) {
                     return 0;
                 }
                 let value = match u8::from_str_radix(label, 16) {
@@ -576,7 +588,7 @@ pub fn in_arpa_name_2_addr(name: &[u8], addrr: &mut Vec<u8>) -> u32 {
                     addrr[idx / 2] = value << 4;
                 }
                 if idx > 0 {
-                    idx -= 1;
+                    idx = idx.saturating_sub(1);
                 }
             }
             return F_IPV6;
@@ -620,7 +632,7 @@ pub fn extract_neg_addrs(
     }
 
     // 跳过问题部分
-    let mut p = match skip_questions(&header, plen) {
+    let mut p = match skip_questions(header, plen) {
         Some(ptr) => ptr,
         None => return, // 数据包无效
     };
@@ -632,7 +644,7 @@ pub fn extract_neg_addrs(
             return; // 提取失败
         }
 
-        if p.len() < 10 {
+        if p.is_empty() {
             return; // 包太短
         }
 
@@ -649,7 +661,7 @@ pub fn extract_neg_addrs(
                 return; // 提取失败
             }
 
-            if p.len() < 20 {
+            if p.is_empty() {
                 return; // 数据包无效
             }
 
@@ -663,7 +675,7 @@ pub fn extract_neg_addrs(
             p = &p[rdlen..]; // 跳过其他记录
         }
 
-        if p.len() > plen {
+        if p.is_empty() {
             return; // 数据包无效
         }
     }
@@ -684,7 +696,7 @@ pub fn extract_neg_addrs(
             return; // 提取失败
         }
 
-        if p.len() < 4 {
+        if p.is_empty() {
             return; // 包无效
         }
 

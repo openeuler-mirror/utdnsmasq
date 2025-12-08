@@ -3,6 +3,8 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+#![allow(unexpected_cfgs)]
+
 use crate::*;
 use forward::*;
 use libc::INADDR_ANY;
@@ -111,7 +113,7 @@ pub fn add_iface(
         }
     }
 
-    if flags & 0x8 == 0 && names.as_ref().map_or(true, |n| n.found == false) {
+    if flags & 0x8 == 0 && names.as_ref().map_or(true, |n| !n.found) {
         return None;
     }
 
@@ -132,7 +134,7 @@ pub fn add_iface(
         }
     }
 
-    if addrs.as_ref().map_or(true, |n| n.found == false) {
+    if addrs.as_ref().map_or(true, |n| !n.found) {
         return None;
     }
 
@@ -666,7 +668,7 @@ pub fn reload_servers(
 
     // 将旧服务器放入可重用列表中
     while let Some(mut current) = serv.take() {
-        let next = mem::replace(&mut current.next, None); // 获取下一个节点并断开当前节点的链接
+        let next = current.next.take(); // 获取下一个节点并断开当前节点的链接
         *serv = next; // 更新 serv 到下一个节点
 
         if current.flags & SERV_FROM_RESOLV != 0 {
@@ -681,7 +683,7 @@ pub fn reload_servers(
     }
 
     // 如果没有提供 fname 或其中没有文件名，则返回现有的服务器列表
-    let file_path = match <Option<Box<option::ResolvC>> as Clone>::clone(&fname)
+    let file_path = match <Option<Box<option::ResolvC>> as Clone>::clone(fname)
         .and_then(|resolv| resolv.name)
     {
         Some(path) => path,
@@ -769,7 +771,7 @@ pub fn reload_servers(
         if let Some(first_old) = old_servers.take() {
             *serv = Some(first_old);
             if let Some(ref mut serv_inner) = serv.as_mut() {
-                old_servers = mem::replace(&mut serv_inner.next, None);
+                old_servers = serv_inner.next.take();
             }
         }
 
