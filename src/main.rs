@@ -175,7 +175,7 @@ const CHGRP: &str = "dip"; // 默认组名
 const IFPACKET: &str = "/usr/include/netpacket/packet.h";
 const IFBPF: &str = "/usr/include/linux/bpf.h";
 const LEASEFILE: &str = "/var/lib/misc/dnsmasq.leases";
-const VERSION: &str = "0.0.3";
+const VERSION: &str = "1.0.0";
 const F_QUERY: u32 = 8192;
 const CONFILE: &str = "/etc/utdnsmasq.conf";
 

@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+
 #![allow(unexpected_cfgs)]
 
 use crate::*;
@@ -134,7 +135,7 @@ pub fn add_iface(
         }
     }
 
-    if addrs.as_ref().map_or(true, |n| !n.found) {
+    if addrs.as_ref().is_none_or(|n| !n.found) {
         return None;
     }
 

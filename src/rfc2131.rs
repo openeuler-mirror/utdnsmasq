@@ -12,7 +12,8 @@
     dead_code,
     clippy::too_many_arguments,
     clippy::needless_borrow,
-    non_snake_case
+    non_snake_case,
+    clippy::unnecessary_unwrap
 )]
 
 use crate::lease::*;
