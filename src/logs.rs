@@ -40,51 +40,51 @@ pub fn log_init() {
 
 #[macro_export]
 macro_rules! syslog {
-     ($priority:expr, $fmt:expr) => {{
-         match $priority {
-             LOG_EMERG | LOG_ALERT |LOG_CRIT => {
-                 log::error!($fmt);
-             }
-             LOG_ERR => {
-                 log::error!($fmt);
-             }
-             LOG_WARNING => {
-                 log::warn!($fmt);
-             }
-             LOG_NOTICE | LOG_INFO => {
-                 log::info!($fmt);
-             }
-             LOG_DEBUG => {
-                 log::debug!($fmt);
-             }
-             _ => {
-                 log::debug!($fmt);
-             }
-         }
-     }};
-     ($priority:expr, $fmt:expr, $($args:tt),*) => {{
-         match $priority {
-             LOG_EMERG | LOG_ALERT |LOG_CRIT => {
-                 log::error!($fmt, $($args),*);
-             }
-             LOG_ERR => {
-                 log::error!($fmt, $($args),*);
-             }
-             LOG_WARNING => {
-                 log::warn!($fmt, $($args),*);
-             }
-             LOG_NOTICE | LOG_INFO => {
-                 log::info!($fmt, $($args),*);
-             }
-             LOG_DEBUG => {
-                 log::debug!($fmt, $($args),*);
-             }
-             _ => {
-                 log::debug!($fmt, $($args),*);
-             }
-         }
-     }};
- }
+    ($priority:expr, $fmt:expr) => {{
+        match $priority {
+            LOG_EMERG | LOG_ALERT |LOG_CRIT => {
+                log::error!($fmt);
+            }
+            LOG_ERR => {
+                log::error!($fmt);
+            }
+            LOG_WARNING => {
+                log::warn!($fmt);
+            }
+            LOG_NOTICE | LOG_INFO => {
+                log::info!($fmt);
+            }
+            LOG_DEBUG => {
+                log::debug!($fmt);
+            }
+            _ => {
+                log::debug!($fmt);
+            }
+        }
+    }};
+    ($priority:expr, $fmt:expr, $($args:tt),*) => {{
+        match $priority {
+            LOG_EMERG | LOG_ALERT |LOG_CRIT => {
+                log::error!($fmt, $($args),*);
+            }
+            LOG_ERR => {
+                log::error!($fmt, $($args),*);
+            }
+            LOG_WARNING => {
+                log::warn!($fmt, $($args),*);
+            }
+            LOG_NOTICE | LOG_INFO => {
+                log::info!($fmt, $($args),*);
+            }
+            LOG_DEBUG => {
+                log::debug!($fmt, $($args),*);
+            }
+            _ => {
+                log::debug!($fmt, $($args),*);
+            }
+        }
+    }};
+}
 
 pub fn complain(message: &str, arg1: &str) {
     let errmess = std::io::Error::last_os_error().to_string();
