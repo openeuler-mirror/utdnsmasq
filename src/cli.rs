@@ -4,13 +4,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::VERSION;
 use clap::{ArgAction, Parser};
 use std::process;
 
 #[derive(Debug, Parser)]
 #[command(version, long_about = None, disable_help_flag = true, disable_version_flag = true)]
-pub struct Cli {
+pub struct Args {
     /// Specify local address(es) to listen on.
     #[arg(short = 'a', long = "listen-address", value_name = "ipaddr", action = ArgAction::Append)]
     pub listen_address: Option<Vec<String>>,
@@ -53,12 +52,11 @@ pub struct Cli {
 
     /// Enable DHCP in the range given with lease duration.
     #[arg(short = 'F', long = "dhcp-range", value_name = "ipaddr,ipaddr,time")]
-    pub dhcp_range: Option<String>,
+    pub dhcp_range: Option<Vec<String>>,
 
-    /// Don't forward spurious DNS requests from Windows hosts.
-    #[arg(short = 'f', long)]
-    pub filterwin2k: bool,
-
+    // /// Don't forward spurious DNS requests from Windows hosts.
+    // #[arg(short = 'f', long)]
+    // pub filterwin2k: bool,
     /// Change to this group after startup (defaults to " CHGRP ").
     #[arg(short = 'g', long, value_name = "groupname")]
     pub group: Option<String>,
@@ -113,7 +111,7 @@ pub struct Cli {
 
     /// Set extra options to be set to DHCP clients.
     #[arg(short = 'O', long = "dhcp-option", value_name = "optspec")]
-    pub dhcp_option: Option<String>,
+    pub dhcp_option: Option<Vec<String>>,
 
     /// Specify port to listen for DNS requests on (defaults to 53).
     #[arg(short = 'p', long = "port", value_name = "number")]
@@ -132,8 +130,8 @@ pub struct Cli {
     pub no_resolv: bool,
 
     /// Specify path to resolv.conf (defaults to " RESOLVFILE ").
-    #[arg(short = 'r', long = "resolv-file", value_name = "path")]
-    pub resolv_file: Option<String>,
+    #[arg(short = 'r', long = "resolv-file", value_name = "path", action = ArgAction::Append)]
+    pub resolv_file: Option<Vec<String>>,
 
     ///Specify address(es) of upstream servers with optional domains.
     #[arg(short = 'S', long, value_name = "/domain/ipaddr", action = ArgAction::Append )]
@@ -172,22 +170,22 @@ pub struct Cli {
     pub pid_file: Option<String>,
 }
 
-pub fn parse_args() -> Cli {
-    let cli = Cli::parse();
+pub fn parse_args() -> Args {
+    let args = Args::parse();
 
     /* -w --help 显示帮助 */
-    if cli.help {
+    if args.help {
         display_usage();
         process::exit(0);
     }
 
     /* -v --version显示版本信息 */
-    if cli.version {
-        println!("utdnsmasq version {}", VERSION);
+    if args.version {
+        println!("utdnsmasq version {}", env!("CARGO_PKG_VERSION"));
         process::exit(0);
     }
 
-    cli
+    args
 }
 
 fn display_usage() {
@@ -196,46 +194,46 @@ fn display_usage() {
 
 /* 帮助信息 */
 const USAGE: &str = r#"
-Usage: utdnsmasq [options]
+Usage: dnsmasq [options]
+
 Valid options are :
-    listen-address=ipaddr         Specify local address(es) to listen on.
-    address=/domain/ipaddr        Return ipaddr for all hosts in specified domains.
-    bogus-priv                    Fake reverse lookups for RFC1918 private address ranges.
-    bogus-nxdomain=ipaddr         Treat ipaddr as NXDOMAIN (defeats Verisign wildcard).
-    cache-size=cachesize          Specify the size of the cache in entries (defaults to %d).
-    conf-file=path                Specify configuration file (defaults to " CONFFILE ").
-    no-daemon                     Do NOT fork into the background: run in debug mode.
-    domain-needed                 Do NOT forward queries with no domain part.
-    selfmx                        Return self-pointing MX records for local hosts.
-    expand-hosts                  Expand simple names in /etc/hosts with domain-suffix.
-    filterwin2k                   Don't forward spurious DNS requests from Windows hosts.
-    dhcp-range=ipaddr,ipaddr,time Enable DHCP in the range given with lease duration.
-    group=groupname               Change to this group after startup (defaults to " CHGRP ").
-    dhcp-host=<hostspec>          Set address or hostname for a specified machine.
-    no-hosts                      Do NOT load " HOSTSFILE " file.
-    addn-hosts=path               Specify a hosts file to be read in addition to " HOSTSFILE ".
-    interface=interface           Specify interface(s) to listen on.
-    except-interface=int          Specify interface(s) NOT to listen on.
-    dhcp-leasefile=path           Specify where to store DHCP leases (defaults to " LEASEFILE ").
-    localmx                       Return MX records for local hosts.
-    mx-host=host_name             Specify the MX name to reply to.
-    dhcp-boot=<bootp opts>        Specify BOOTP options to DHCP server.
-    no-poll                       Do NOT poll " RESOLVFILE " file, reload only on SIGHUP.
-    no-negcache                   Do NOT cache failed search results.
-    strict-order                  Use nameservers strictly in the order given in " RESOLVFILE ".
-    dhcp-option=<optspec>         Set extra options to be set to DHCP clients.
-    port=number                   Specify port to listen for DNS requests on (defaults to 53).
-    log-queries                   Log queries.
-    query-port=number             Force the originating port for upstream queries.
-    no-resolv                     Do NOT read resolv.conf.
-    resolv-file=path              Specify path to resolv.conf (defaults to " RESOLVFILE ").
-    server=/domain/ipaddr         Specify address(es) of upstream servers with optional domains.
-    local=/domain/                Never forward queries to specified domains.
-    domain=domain                 Specify the domain to be assigned in DHCP leases.
-    mx-target=host_name           Specify the host in an MX reply.
-    local-ttl=time                Specify time-to-live in seconds for replies from /etc/hosts.
-    user=username                 Change to this user after startup. (defaults to " CHUSER ").
-    version                       Display utdnsmasq version.
-    help                          Display this message.
-    pid-file=path                 Specify path of PID file. (defaults to " RUNFILE ").
+-a, --listen-address=ipaddr         Specify local address(es) to listen on.
+-A, --address=/domain/ipaddr        Return ipaddr for all hosts in specified domains.
+-b, --bogus-priv                    Fake reverse lookups for RFC1918 private address ranges.
+-B, --bogus-nxdomain=ipaddr         Treat ipaddr as NXDOMAIN (defeats Verisign wildcard).
+-c, --cache-size=cachesize          Specify the size of the cache in entries (defaults to 150).
+-C, --conf-file=path                Specify configuration file (defaults to /etc/dnsmasq.conf).
+-d, --no-daemon                     Do NOT fork into the background: run in debug mode.
+-D, --domain-needed                 Do NOT forward queries with no domain part.
+-e, --selfmx                        Return self-pointing MX records for local hosts.
+-E, --expand-hosts                  Expand simple names in /etc/hosts with domain-suffix.
+-F, --dhcp-range=ipaddr,ipaddr,time Enable DHCP in the range given with lease duration.
+-g, --group=groupname               Change to this group after startup (defaults to dip).
+-G, --dhcp-host=<hostspec>          Set address or hostname for a specified machine.
+-h, --no-hosts                      Do NOT load /etc/hosts file.
+-H, --addn-hosts=path               Specify a hosts file to be read in addition to /etc/hosts.
+-i, --interface=interface           Specify interface(s) to listen on.
+-I, --except-interface=int          Specify interface(s) NOT to listen on.
+-l, --dhcp-leasefile=path           Specify where to store DHCP leases (defaults to /var/lib/misc/dnsmasq.leases).
+-L, --localmx                       Return MX records for local hosts.
+-m, --mx-host=host_name             Specify the MX name to reply to.
+-M, --dhcp-boot=<bootp opts>        Specify BOOTP options to DHCP server.
+-n, --no-poll                       Do NOT poll /etc/resolv.conf file, reload only on SIGHUP.
+-N, --no-negcache                   Do NOT cache failed search results.
+-o, --strict-order                  Use nameservers strictly in the order given in /etc/resolv.conf.
+-O, --dhcp-option=<optspec>         Set extra options to be set to DHCP clients.
+-p, --port=number                   Specify port to listen for DNS requests on (defaults to 53).
+-q, --log-queries                   Log queries.
+-Q, --query-port=number             Force the originating port for upstream queries.
+-R, --no-resolv                     Do NOT read resolv.conf.
+-r, --resolv-file=path              Specify path to resolv.conf (defaults to /etc/resolv.conf).
+-S, --server=/domain/ipaddr         Specify address(es) of upstream servers with optional domains.
+    --local=/domain/                Never forward queries to specified domains.
+-s, --domain=domain                 Specify the domain to be assigned in DHCP leases.
+-t, --mx-target=host_name           Specify the host in an MX reply.
+-T, --local-ttl=time                Specify time-to-live in seconds for replies from /etc/hosts.
+-u, --user=username                 Change to this user after startup. (defaults to nobody).
+-v, --version                       Display dnsmasq version.
+-w, --help                          Display this message.
+-x, --pid-file=path                 Specify path of PID file. (defaults to /var/run/dnsmasq.pid).
 "#;
