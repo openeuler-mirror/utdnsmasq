@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#![allow(clippy::borrow_interior_mutable_const)]
-
 use colored::*;
 use std::borrow::Cow;
 use tklog::{LOG, MODE};
@@ -19,8 +17,8 @@ pub const LOG_NOTICE: i8 = 5;
 pub const LOG_INFO: i8 = 6;
 pub const LOG_DEBUG: i8 = 7;
 
-// 日志记录到当前目录下的utdnsmasq.log文件
-const LOG_FILE: &str = "utdnsmasq.log";
+// 日志记录到/var/log/utdnsmasq.log文件
+const LOG_FILE: &str = "/var/log/utdnsmasq.log";
 
 pub fn log_init() {
     let levelstr = "{level}".green(); //日志级别标识设置为绿色
@@ -28,33 +26,34 @@ pub fn log_init() {
     let filestr = "{file}".red(); //文件属性标识设置为红色
     let messagestr = ":{message}".blue(); // 信息属性标识修改为蓝色
     let s = format!("{} {} {} {}\n", levelstr, timestr, filestr, messagestr);
+
+    // 避免直接借用带内部可变性的 const（clippy::borrow_interior_mutable_const）
+    let log = LOG;
+
     //设置日志格式
-    LOG.set_formatter(s.as_str()).uselog();
+    log.set_formatter(s.as_str()).uselog();
     // 日志写入到文件
-    LOG.set_cutmode_by_time(LOG_FILE, MODE::MONTH, 0, false);
+    log.set_cutmode_by_time(LOG_FILE, MODE::MONTH, 0, false);
     // 设置日志级别为debug
-    LOG.set_level(tklog::LEVEL::Debug);
+    log.set_level(tklog::LEVEL::Debug);
     //开启同步写入日志
-    LOG.set_printmode(tklog::PRINTMODE::PUNCTUAL);
+    log.set_printmode(tklog::PRINTMODE::PUNCTUAL);
 }
 
 #[macro_export]
 macro_rules! syslog {
     ($priority:expr, $fmt:expr) => {{
         match $priority {
-            LOG_EMERG | LOG_ALERT |LOG_CRIT => {
+            $crate::logs::LOG_EMERG | $crate::logs::LOG_ALERT | $crate::logs::LOG_CRIT | $crate::logs::LOG_ERR => {
                 log::error!($fmt);
             }
-            LOG_ERR => {
-                log::error!($fmt);
-            }
-            LOG_WARNING => {
+            $crate::logs::LOG_WARNING => {
                 log::warn!($fmt);
             }
-            LOG_NOTICE | LOG_INFO => {
+            $crate::logs::LOG_NOTICE | $crate::logs::LOG_INFO => {
                 log::info!($fmt);
             }
-            LOG_DEBUG => {
+            $crate::logs::LOG_DEBUG => {
                 log::debug!($fmt);
             }
             _ => {
@@ -64,19 +63,16 @@ macro_rules! syslog {
     }};
     ($priority:expr, $fmt:expr, $($args:tt),*) => {{
         match $priority {
-            LOG_EMERG | LOG_ALERT |LOG_CRIT => {
+            $crate::logs::LOG_EMERG | $crate::logs::LOG_ALERT | $crate::logs::LOG_CRIT | $crate::logs::LOG_ERR => {
                 log::error!($fmt, $($args),*);
             }
-            LOG_ERR => {
-                log::error!($fmt, $($args),*);
-            }
-            LOG_WARNING => {
+            $crate::logs::LOG_WARNING => {
                 log::warn!($fmt, $($args),*);
             }
-            LOG_NOTICE | LOG_INFO => {
+            $crate::logs::LOG_NOTICE | $crate::logs::LOG_INFO => {
                 log::info!($fmt, $($args),*);
             }
-            LOG_DEBUG => {
+            $crate::logs::LOG_DEBUG => {
                 log::debug!($fmt, $($args),*);
             }
             _ => {
@@ -96,7 +92,7 @@ pub fn complain(message: &str, arg1: &str) {
     };
 
     // 把错误信息输出到标准错误
-    eprintln!("dnsmasq: {message}, {arg1}, {errmess}");
+    eprintln!("utdnsmasq: {message}, {arg1}, {errmess}");
 
     // 把错误信息输出到系统日志
     syslog!(LOG_CRIT, "{} {}, {}", message, arg1, errmess);
