@@ -4,221 +4,653 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-use crate::*;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::ffi::CString;
+use socket2::Socket;
 use std::fs;
-use std::io::Read;
-use std::net::SocketAddr;
-use std::net::{SocketAddrV4, SocketAddrV6};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::fd::AsRawFd;
 use std::process;
-use std::ptr;
+use std::sync::{Mutex, Once};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn get_seed() -> u64 {
-    // 读取RANDFILE中的数据
-    let rand_file_path = "/dev/urandom";
-    // 读取8字节
-    let mut buffer = [0u8; 8];
+const RANDFILE: &str = "/dev/urandom"; // 或根据实际需要修改
 
-    if let Ok(mut file) = fs::File::open(rand_file_path) {
-        if file.read_exact(&mut buffer).is_ok() {
-            // 成功读取文件
-            return u64::from_le_bytes(buffer);
+// 使用Once确保只初始化一次
+static INIT: Once = Once::new();
+// 使用Mutex保护RNG的状态
+static RNG: Mutex<Option<StdRng>> = Mutex::new(None);
+
+fn init_rng() {
+    let mut seed = [0u8; 32]; // 使用32字节种子
+
+    // 尝试从文件读取种子
+    if let Ok(mut file) = fs::File::open(RANDFILE) {
+        if io::Read::read_exact(&mut file, &mut seed).is_ok() {
+            // 成功从文件读取种子
+            let rng = StdRng::from_seed(seed);
+            *RNG.lock().unwrap() = Some(rng);
+            return;
         }
     }
 
-    // 如果文件不可用，使用当前时间和进程ID生成
-    let time = SystemTime::now()
+    // 备用种子：时间 + 进程ID
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let pid = process::id() as u64;
+        .unwrap_or_default();
 
-    // 将时间和进程ID组合为一个64位整数
-    time ^ pid
+    let badseed = now.as_secs() ^ now.subsec_nanos() as u64 ^ ((process::id() as u64) << 16);
+
+    // 将8字节的badseed转换为32字节的数组
+    let mut seed_bytes = [0u8; 32];
+    let badseed_bytes = badseed.to_le_bytes();
+    seed_bytes[..8].copy_from_slice(&badseed_bytes);
+
+    let rng = StdRng::from_seed(seed_bytes);
+
+    *RNG.lock().unwrap() = Some(rng);
+    println!("seed from time/pid: {}", badseed);
 }
 
 pub fn rand16() -> u16 {
-    let seed = get_seed();
+    INIT.call_once(|| {
+        init_rng();
+    });
 
-    // 初始化随机数生成器
-    let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
+    let mut rng_guard = RNG.lock().unwrap();
+    let rng = rng_guard.as_mut().expect("RNG should be initialized");
 
-    // 生成随机数并保留高位部分（去除低15位和最高位）
-    let random_number: u32 = rng.gen();
-    ((random_number >> 16) & 0x7FFF) as u16 // 高位取15位，忽略最高位
+    // 生成随机数并右移，只保留高16位（去掉最高位）
+    let rand_val: u32 = rng.gen();
+    (rand_val >> 15) as u16
 }
 
-pub fn canonicalise(s: &str) -> Option<String> {
+pub fn legal_char(c: char) -> bool {
+    if c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_' {
+        return true;
+    }
+    false
+}
+// 检查域名合法性
+pub fn canonicalise(s: &str) -> bool {
     // 移除末尾的点号
     let s = s.trim_end_matches('.');
 
     // 遍历字符串中的每个字符，检查是否合法
     for c in s.chars() {
         // 如果字符不在合法字符范围内，返回 None
-        if !(c.is_ascii_alphanumeric() || c == '-' || c == '/' || c == '_') {
-            return None;
+        if c != '.' && !legal_char(c) {
+            return false;
         }
     }
 
-    Some(s.to_string())
+    true
 }
 
-pub fn safe_string_alloc(cp: &str) -> *mut i8 {
-    // 检查输入字符串是否有效且非空
-    if cp.is_empty() {
-        return ptr::null_mut(); // 返回空指针
+// 判断是否能转换为数字
+pub fn is_decimal<T: std::str::FromStr>(s: &str) -> Option<T> {
+    match s.parse::<T>() {
+        Ok(num) => Some(num),
+        Err(_) => None,
     }
-
-    // 分配与输入字符串长度匹配的内存，并将字符串复制到新分配的内存中
-    let c_string = CString::new(cp).unwrap(); // 将Rust字符串转换为C风格字符串
-    let cv: Vec<u8> = c_string.into_bytes_with_nul();
-    let mut tmp: Vec<i8> = cv.into_iter().map(|c| c as i8).collect(); // 将 Vec<u8> 转换为 Vec<i8>
-    let c_ptr: *mut i8 = tmp.as_mut_ptr();
-
-    // 返回该内存地址
-    c_ptr
 }
 
-// 检查地址是否与接口相等的函数
-// pub fn sockaddr_isequal(addr1: &MySockAddr, addr2: &MySockAddr) -> bool {
-//     unsafe {
-//         println!("xxxxxxxxxxxxxxxxxxxxxaddr1.sa.sa_family={:?}  ", addr1.sa.sa_family);
-//         println!("xxxxxxxxxxxxxxxxxxxxxaddr2.sa.sa_family={:?}  ", addr2.sa.sa_family);
-//         println!("xxxxxxxxxxxxxxxxxxxxxaddr1.in_.sin_addr.s_addr={:?}  ", addr1.in_.sin_addr.s_addr);
-//         println!("xxxxxxxxxxxxxxxxxxxxxaddr2.in_.sin_addr.s_addr={:?}  ", addr2.in_.sin_addr.s_addr);
-//         match (addr1.sa.sa_family, addr2.sa.sa_family) {
-//             (2, 2) => addr1.in_.sin_addr.s_addr == addr2.in_.sin_addr.s_addr, // AF_INET
-//             (10, 10) => {
-//                 let in6_addr1 = &addr1.in6;
-//                 let in6_addr2 = &addr2.in6;
-//                 in6_addr1.sin6_addr.s6_addr == in6_addr2.sin6_addr.s6_addr // AF_INET6
-//             }
-//             _ => false,
-//         }
-//     }
-// }
-pub fn sockaddr_isequal(s1: &MySockAddr, s2: &MySockAddr) -> bool {
-    unsafe {
-        if s1.sa.sa_family == s2.sa.sa_family {
-            match s1.sa.sa_family {
-                AF_INET => {
-                    let addr_match = s1.in_.sin_addr == s2.in_.sin_addr;
-                    let port_match = s1.in_.sin_port == s2.in_.sin_port;
-                    addr_match && port_match
-                }
-                AF_INET6 => {
-                    s1.in6.sin6_port == s2.in6.sin6_port
-                        && s1.in6.sin6_flowinfo == s2.in6.sin6_flowinfo
-                        && s1.in6.sin6_addr == s2.in6.sin6_addr
-                }
-                _ => false,
-            }
-        } else {
-            false
+pub fn is_valid_char(c: char) -> bool {
+    c == '.' || c.is_whitespace() || c.is_ascii_digit()
+}
+
+// ipv4 & 掩码
+pub trait ToIpv4 {
+    fn to_ipv4(self) -> Option<Ipv4Addr>;
+}
+
+impl ToIpv4 for IpAddr {
+    fn to_ipv4(self) -> Option<Ipv4Addr> {
+        match self {
+            IpAddr::V4(ipv4) => Some(ipv4),
+            _ => None,
         }
     }
 }
 
-// 计算 socket 地址的长度
-pub fn sa_len(addr: &SocketAddr) -> usize {
-    match addr {
-        SocketAddr::V4(_) => {
-            // IPv4 地址结构的长度
-            std::mem::size_of::<SocketAddrV4>()
-        }
-        SocketAddr::V6(_) => {
-            // IPv6 地址结构的长度
-            std::mem::size_of::<SocketAddrV6>()
+impl ToIpv4 for Ipv4Addr {
+    fn to_ipv4(self) -> Option<Ipv4Addr> {
+        Some(self)
+    }
+}
+
+// ipv6 特征
+pub trait ToIpv6 {
+    fn to_ipv6(self) -> Option<Ipv6Addr>;
+}
+
+impl ToIpv6 for IpAddr {
+    fn to_ipv6(self) -> Option<Ipv6Addr> {
+        match self {
+            IpAddr::V6(ipv6) => Some(ipv6),
+            _ => None,
         }
     }
 }
 
+impl ToIpv6 for Ipv6Addr {
+    fn to_ipv6(self) -> Option<Ipv6Addr> {
+        Some(self)
+    }
+}
+
+pub fn ipv4_and_mask<I: ToIpv4>(ip: I, mask: Ipv4Addr) -> Option<IpAddr> {
+    if let Some(ipv4) = ip.to_ipv4() {
+        let ip_u32 = u32::from(ipv4);
+        let mask_u32 = u32::from(mask);
+        let result_u32 = ip_u32 & mask_u32;
+        Some(IpAddr::V4(Ipv4Addr::from(result_u32)))
+    } else {
+        None
+    }
+}
+
+// 判断主机名是否相等
 pub fn hostname_isequal(a: &str, b: &str) -> bool {
-    /*
-        检查两个字符串是否相等，忽略大小写和空格
-    */
     a.eq_ignore_ascii_case(b)
 }
 
-pub fn safe_malloc(size: usize) -> Vec<u8> {
-    let mut vec = Vec::with_capacity(size);
-    if vec.capacity() < size {
-        eprintln!("Out of memory");
-        std::process::exit(1);
+// 计算时间差，返回以秒为单位的差值
+pub fn difftime(now: SystemTime, ttd: SystemTime) -> i64 {
+    match now.duration_since(ttd) {
+        Ok(duration) => duration.as_secs() as i64, // 正常情况返回秒数
+        Err(_) => -(ttd.duration_since(now).unwrap().as_secs() as i64), // 如果时间倒置，返回负数
     }
-    vec.resize(size, 0); // Initialize with zeroes
-    vec
 }
 
+// 类型转换  SystemTime -> u64
+pub fn system_time_to_u64(t: SystemTime) -> Option<u64> {
+    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
+pub fn socket_is_eq(socket1: &Socket, socket2: &Socket) -> bool {
+    if socket1.as_raw_fd() == socket2.as_raw_fd() {
+        return true;
+    }
+
+    false
+}
+
+const NS_INT16SZ: usize = 2;
+const NS_INT32SZ: usize = 4;
+// 从一个字节切片中读取一个16位无符号整数，并更新切片的起始位置
+pub fn get_short(cp: &mut &[u8]) -> u16 {
+    if cp.len() < NS_INT16SZ {
+        panic!("Not enough data to read 16 bits value");
+    }
+
+    let value = ((cp[0] as u16) << 8) | (cp[1] as u16);
+    *cp = &cp[NS_INT16SZ..]; // 更新指针位置，相当于 C 代码中的 (cp) += NS_INT16SZ;
+
+    value
+}
+
+// 从一个字节切片中读取一个32位整数，并更新切片的起始位置
+pub fn get_long(cp: &mut &[u8]) -> u32 {
+    if cp.len() < NS_INT32SZ {
+        panic!("Not enough data to read 32 bits value");
+    }
+
+    let value =
+        ((cp[0] as u32) << 24) | ((cp[1] as u32) << 16) | ((cp[2] as u32) << 8) | (cp[3] as u32);
+    *cp = &cp[NS_INT32SZ..]; // 更新指针位置，相当于 C 代码中的 (cp) += NS_INT32SZ;
+
+    value
+}
+
+pub fn put_long(l: u32, cp: &mut Vec<u8>) {
+    // 将 32 位整数按大端序追加到 `cp` 的末尾
+    cp.push((l >> 24) as u8); // 写入高 8 位
+    cp.push((l >> 16) as u8); // 写入次高 8 位
+    cp.push((l >> 8) as u8); // 写入次低 8 位
+    cp.push((l & 0xff) as u8); // 写入低 8 位
+}
+
+pub fn put_short(s: u16, cp: &mut Vec<u8>) {
+    cp.push((s >> 8) as u8); // 写入次低 8 位
+    cp.push((s & 0xff) as u8); // 写入低 8 位
+}
+
+// 测试函数
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn test_hostname_isequal() {
-        assert!(hostname_isequal("Rust", "rust"));
-        assert!(hostname_isequal("Rust", "Rust"));
-        assert!(!hostname_isequal("Rust", "rusty"));
-        assert!(!hostname_isequal("Rust", "Ru"));
-        assert!(!hostname_isequal("Rust", "r"));
-        assert!(hostname_isequal("R", "r"));
+    fn test_rand16_distribution() {
+        let n_samples = 1000;
+        let values: Vec<u16> = (0..n_samples).map(|_| rand16()).collect();
+
+        // 2. 统计唯一值的数量
+        let unique_count = values
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let uniqueness_ratio = unique_count as f64 / n_samples as f64;
+
+        // 期望大多数值是唯一的
+        assert!(
+            uniqueness_ratio > 0.95,
+            "Uniqueness ratio too low: {}/{} = {}",
+            unique_count,
+            n_samples,
+            uniqueness_ratio
+        );
+
+        // 3. 验证值不全是0或全是最大值
+        let all_zeros = values.iter().all(|&x| x == 0);
+        let all_max = values.iter().all(|&x| x == 0xFFFF);
+        assert!(!all_zeros && !all_max, "All values are the same");
+
+        // 4. 验证平均分布（粗略检查）
+        let mean = values.iter().map(|&x| x as f64).sum::<f64>() / n_samples as f64;
+        // 均匀分布的期望均值是 32767.5
+        let expected_mean = 32767.5;
+        let deviation = (mean - expected_mean).abs() / expected_mean;
+
+        assert!(
+            deviation < 0.1, // 允许10%的偏差
+            "Mean deviation too large: {} (expected ~{})",
+            mean,
+            expected_mean
+        );
     }
 
     #[test]
-    fn sa_len_v4() {
-        let addr_v4: SocketAddrV4 = "127.0.0.1:8080".parse().unwrap();
-        let addr = SocketAddr::V4(addr_v4);
-        assert_eq!(sa_len(&addr), std::mem::size_of::<SocketAddrV4>());
+    fn test_get_short_basic() {
+        let data = [0x12, 0x34];
+        let mut slice = &data[..];
+        let result = get_short(&mut slice);
+        assert_eq!(result, 0x1234);
+        assert_eq!(slice.len(), 0);
     }
 
-    // #[test]
-    // fn sa_len_v6() {
-    //     let addr_v6: SocketAddrV6 = "::1:8080".parse().unwrap();
-    //     let addr = SocketAddr::V6(addr_v6);
-    //     assert_eq!(sa_len(&addr), std::mem::size_of::<SocketAddrV6>());
-    // }
+    #[test]
+    fn test_get_short_multiple_reads() {
+        let data = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
+        let mut slice = &data[..];
 
-    // #[test]
-    // fn canonicalise_valid_string() {
-    //     // 测试一个有效的字符串
-    //     let result = canonicalise("valid-string123");
-    //     assert_eq!(result, 1);
-    // }
+        let first = get_short(&mut slice);
+        assert_eq!(first, 0x1234);
+        assert_eq!(slice.len(), 4);
 
-    // #[test]
-    // fn canonicalise_string_with_trailing_dot() {
-    //     // 测试一个带有末尾点号的字符串
-    //     let result = canonicalise("valid-string123.");
-    //     assert_eq!(result, 1);
-    // }
+        let second = get_short(&mut slice);
+        assert_eq!(second, 0x5678);
+        assert_eq!(slice.len(), 2);
 
-    // #[test]
-    // fn canonicalise_string_with_illegal_character() {
-    //     // 测试一个含有非法字符的字符串
-    //     let result = canonicalise("invalid string!");
-    //     assert_eq!(result, 0);
-    // }
+        let third = get_short(&mut slice);
+        assert_eq!(third, 0x9ABC);
+        assert_eq!(slice.len(), 0);
+    }
 
-    // #[test]
-    // fn canonicalise_empty_string() {
-    //     // 测试一个空字符串
-    //     let result = canonicalise("");
-    //     assert_eq!(result, 1);
-    // }
+    #[test]
+    fn test_get_short_endianness() {
+        // 测试大端序字节序
+        let data = [0x00, 0x01]; // 应该等于 1
+        let mut slice = &data[..];
+        let result = get_short(&mut slice);
+        assert_eq!(result, 1);
 
-    // #[test]
-    // fn canonicalise_string_with_multiple_illegal_characters() {
-    //     // 测试一个含有多个非法字符的字符串
-    //     let result = canonicalise("invalid string!!!");
-    //     assert_eq!(result, 0);
-    // }
+        let data = [0x01, 0x00]; // 应该等于 256
+        let mut slice = &data[..];
+        let result = get_short(&mut slice);
+        assert_eq!(result, 256);
 
-    // #[test]
-    // fn canonicalise_string_with_special_characters() {
-    //     // 测试一个含有特殊字符但仍然合法的字符串
-    //     let result = canonicalise("valid-string_123");
-    //     assert_eq!(result, 1);
-    // }
+        let data = [0xFF, 0xFF]; // 应该等于 65535
+        let mut slice = &data[..];
+        let result = get_short(&mut slice);
+        assert_eq!(result, 65535);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough data to read 16 bits value")]
+    fn test_get_short_insufficient_data() {
+        let data = [0x12]; // 只有1个字节，不够2个字节
+        let mut slice = &data[..];
+        get_short(&mut slice);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough data to read 16 bits value")]
+    fn test_get_short_empty_slice() {
+        let data: [u8; 0] = [];
+        let mut slice = &data[..];
+        get_short(&mut slice);
+    }
+
+    #[test]
+    fn test_get_long_basic() {
+        let data = [0x12, 0x34, 0x56, 0x78];
+        let mut slice = &data[..];
+        let result = get_long(&mut slice);
+        assert_eq!(result, 0x12345678);
+        assert_eq!(slice.len(), 0);
+    }
+
+    #[test]
+    fn test_get_long_multiple_reads() {
+        let data = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0];
+        let mut slice = &data[..];
+
+        let first = get_long(&mut slice);
+        assert_eq!(first, 0x12345678);
+        assert_eq!(slice.len(), 4);
+
+        let second = get_long(&mut slice);
+        assert_eq!(second, 0x9ABCDEF0);
+        assert_eq!(slice.len(), 0);
+    }
+
+    #[test]
+    fn test_get_long_endianness() {
+        // 测试大端序字节序
+        let data = [0x00, 0x00, 0x00, 0x01]; // 应该等于 1
+        let mut slice = &data[..];
+        let result = get_long(&mut slice);
+        assert_eq!(result, 1);
+
+        let data = [0x00, 0x00, 0x01, 0x00]; // 应该等于 256
+        let mut slice = &data[..];
+        let result = get_long(&mut slice);
+        assert_eq!(result, 256);
+
+        let data = [0x00, 0x01, 0x00, 0x00]; // 应该等于 65536
+        let mut slice = &data[..];
+        let result = get_long(&mut slice);
+        assert_eq!(result, 65536);
+
+        let data = [0x01, 0x00, 0x00, 0x00]; // 应该等于 16777216
+        let mut slice = &data[..];
+        let result = get_long(&mut slice);
+        assert_eq!(result, 16777216);
+
+        let data = [0xFF, 0xFF, 0xFF, 0xFF]; // 应该等于 4294967295
+        let mut slice = &data[..];
+        let result = get_long(&mut slice);
+        assert_eq!(result, 4294967295);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough data to read 32 bits value")]
+    fn test_get_long_insufficient_data() {
+        let data = [0x12, 0x34, 0x56]; // 只有3个字节，不够4个字节
+        let mut slice = &data[..];
+        get_long(&mut slice);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not enough data to read 32 bits value")]
+    fn test_get_long_empty_slice() {
+        let data: [u8; 0] = [];
+        let mut slice = &data[..];
+        get_long(&mut slice);
+    }
+
+    #[test]
+    fn test_get_short_and_get_long_mixed() {
+        let data = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC];
+        let mut slice = &data[..];
+
+        // 先读一个short
+        let short = get_short(&mut slice);
+        assert_eq!(short, 0x1234);
+        assert_eq!(slice.len(), 4);
+
+        // 再读一个long
+        let long = get_long(&mut slice);
+        assert_eq!(long, 0x56789ABC);
+        assert_eq!(slice.len(), 0);
+    }
+
+    #[test]
+    fn test_get_short_boundary_values() {
+        // 测试边界值
+        let data = [0x00, 0x00]; // 最小值
+        let mut slice = &data[..];
+        assert_eq!(get_short(&mut slice), 0);
+
+        let data = [0xFF, 0xFF]; // 最大值
+        let mut slice = &data[..];
+        assert_eq!(get_short(&mut slice), 65535);
+    }
+
+    #[test]
+    fn test_get_long_boundary_values() {
+        // 测试边界值
+        let data = [0x00, 0x00, 0x00, 0x00]; // 最小值
+        let mut slice = &data[..];
+        assert_eq!(get_long(&mut slice), 0);
+
+        let data = [0xFF, 0xFF, 0xFF, 0xFF]; // 最大值
+        let mut slice = &data[..];
+        assert_eq!(get_long(&mut slice), 4294967295);
+    }
+
+    #[test]
+    fn test_put_short_basic() {
+        let mut buffer = Vec::new();
+        put_short(0x1234, &mut buffer);
+        assert_eq!(buffer, [0x12, 0x34]);
+    }
+
+    #[test]
+    fn test_put_short_multiple_writes() {
+        let mut buffer = Vec::new();
+        put_short(0x1234, &mut buffer);
+        put_short(0x5678, &mut buffer);
+        put_short(0x9ABC, &mut buffer);
+        assert_eq!(buffer, [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC]);
+    }
+
+    #[test]
+    fn test_put_short_endianness() {
+        let mut buffer = Vec::new();
+
+        // 测试最小值
+        put_short(0, &mut buffer);
+        assert_eq!(buffer, [0x00, 0x00]);
+        buffer.clear();
+
+        // 测试中间值
+        put_short(1, &mut buffer);
+        assert_eq!(buffer, [0x00, 0x01]);
+        buffer.clear();
+
+        // 测试256 (0x0100)
+        put_short(256, &mut buffer);
+        assert_eq!(buffer, [0x01, 0x00]);
+        buffer.clear();
+
+        // 测试最大值
+        put_short(65535, &mut buffer);
+        assert_eq!(buffer, [0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_put_short_boundary_values() {
+        let mut buffer = Vec::new();
+
+        // 测试边界值
+        put_short(0, &mut buffer); // 最小值
+        put_short(32767, &mut buffer); // 中间值
+        put_short(65535, &mut buffer); // 最大值
+
+        assert_eq!(buffer, [0x00, 0x00, 0x7F, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_put_long_basic() {
+        let mut buffer = Vec::new();
+        put_long(0x12345678, &mut buffer);
+        assert_eq!(buffer, [0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn test_put_long_multiple_writes() {
+        let mut buffer = Vec::new();
+        put_long(0x12345678, &mut buffer);
+        put_long(0x9ABCDEF0, &mut buffer);
+        assert_eq!(buffer, [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
+    }
+
+    #[test]
+    fn test_put_long_endianness() {
+        let mut buffer = Vec::new();
+
+        // 测试最小值
+        put_long(0, &mut buffer);
+        assert_eq!(buffer, [0x00, 0x00, 0x00, 0x00]);
+        buffer.clear();
+
+        // 测试1
+        put_long(1, &mut buffer);
+        assert_eq!(buffer, [0x00, 0x00, 0x00, 0x01]);
+        buffer.clear();
+
+        // 测试256 (0x00000100)
+        put_long(256, &mut buffer);
+        assert_eq!(buffer, [0x00, 0x00, 0x01, 0x00]);
+        buffer.clear();
+
+        // 测试65536 (0x00010000)
+        put_long(65536, &mut buffer);
+        assert_eq!(buffer, [0x00, 0x01, 0x00, 0x00]);
+        buffer.clear();
+
+        // 测试16777216 (0x01000000)
+        put_long(16777216, &mut buffer);
+        assert_eq!(buffer, [0x01, 0x00, 0x00, 0x00]);
+        buffer.clear();
+
+        // 测试最大值
+        put_long(4294967295, &mut buffer);
+        assert_eq!(buffer, [0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_put_long_boundary_values() {
+        let mut buffer = Vec::new();
+
+        // 测试边界值
+        put_long(0, &mut buffer); // 最小值
+        put_long(2147483647, &mut buffer); // 中间值 (2^31-1)
+        put_long(4294967295, &mut buffer); // 最大值
+
+        assert_eq!(
+            buffer,
+            [
+                0x00, 0x00, 0x00, 0x00, // 0
+                0x7F, 0xFF, 0xFF, 0xFF, // 2147483647
+                0xFF, 0xFF, 0xFF, 0xFF // 4294967295
+            ]
+        );
+    }
+
+    #[test]
+    fn test_put_short_and_put_long_mixed() {
+        let mut buffer = Vec::new();
+
+        // 混合写入short和long
+        put_short(0x1234, &mut buffer);
+        put_long(0x56789ABC, &mut buffer);
+        put_short(0xDEF0, &mut buffer);
+
+        assert_eq!(
+            buffer,
+            [
+                0x12, 0x34, // 0x1234
+                0x56, 0x78, 0x9A, 0xBC, // 0x56789ABC
+                0xDE, 0xF0 // 0xDEF0
+            ]
+        );
+    }
+
+    #[test]
+    fn test_put_and_get_roundtrip() {
+        // 测试put_short和get_short的往返
+        let mut buffer = Vec::new();
+        put_short(0x1234, &mut buffer);
+        let mut slice = &buffer[..];
+        let result = get_short(&mut slice);
+        assert_eq!(result, 0x1234);
+        assert_eq!(slice.len(), 0);
+
+        // 测试put_long和get_long的往返
+        buffer.clear();
+        put_long(0x56789ABC, &mut buffer);
+        let mut slice = &buffer[..];
+        let result = get_long(&mut slice);
+        assert_eq!(result, 0x56789ABC);
+        assert_eq!(slice.len(), 0);
+
+        // 测试混合往返
+        buffer.clear();
+        put_short(0x1234, &mut buffer);
+        put_long(0x56789ABC, &mut buffer);
+        put_short(0xDEF0, &mut buffer);
+
+        let mut slice = &buffer[..];
+        let short1 = get_short(&mut slice);
+        let long = get_long(&mut slice);
+        let short2 = get_short(&mut slice);
+
+        assert_eq!(short1, 0x1234);
+        assert_eq!(long, 0x56789ABC);
+        assert_eq!(short2, 0xDEF0);
+        assert_eq!(slice.len(), 0);
+    }
+
+    #[test]
+    fn test_to_ipv6_trait() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        // 测试IpAddr::V6
+        let ipv6_addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let ip_addr = IpAddr::V6(ipv6_addr);
+        assert_eq!(ip_addr.to_ipv6(), Some(ipv6_addr));
+
+        // 测试IpAddr::V4 (应该返回None)
+        let ipv4_addr = Ipv4Addr::new(192, 168, 1, 1);
+        let ip_addr = IpAddr::V4(ipv4_addr);
+        assert_eq!(ip_addr.to_ipv6(), None);
+
+        // 测试Ipv6Addr直接调用to_ipv6
+        let ipv6_addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        assert_eq!(ipv6_addr.to_ipv6(), Some(ipv6_addr));
+
+        // 测试IPv6环回地址
+        let loopback_ipv6 = Ipv6Addr::LOCALHOST;
+        let ip_addr = IpAddr::V6(loopback_ipv6);
+        assert_eq!(ip_addr.to_ipv6(), Some(loopback_ipv6));
+
+        // 测试IPv4映射的IPv6地址
+        let ipv4_mapped = Ipv4Addr::new(192, 168, 1, 1).to_ipv6_mapped();
+        let ip_addr = IpAddr::V6(ipv4_mapped);
+        assert_eq!(ip_addr.to_ipv6(), Some(ipv4_mapped));
+    }
+
+    #[test]
+    fn test_to_ipv4_trait() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        // 测试IpAddr::V4
+        let ipv4_addr = Ipv4Addr::new(192, 168, 1, 1);
+        let ip_addr = IpAddr::V4(ipv4_addr);
+        assert_eq!(ip_addr.to_ipv4(), Some(ipv4_addr));
+
+        // 测试IpAddr::V6 (应该返回None)
+        let ipv6_addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let ip_addr = IpAddr::V6(ipv6_addr);
+        assert_eq!(ip_addr.to_ipv4(), None);
+
+        // 测试Ipv4Addr直接调用to_ipv4
+        let ipv4_addr = Ipv4Addr::new(192, 168, 1, 1);
+        assert_eq!(ipv4_addr.to_ipv4(), Some(ipv4_addr));
+    }
 }
