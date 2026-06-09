@@ -4,401 +4,468 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#![allow(
-    clippy::collapsible_if,
-    static_mut_refs,
-    unused_mut,
-    unused_unsafe,
-    unused_variables,
-    unused_assignments,
-    clippy::too_many_arguments,
-    clippy::missing_safety_doc,
-    clippy::map_identity
-)]
+use lazy_static::lazy_static;
+use socket2::Socket;
+use std::net::UdpSocket;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::rfc1035::*;
-use crate::util::*;
-use crate::*;
-use std::{
-    net::{SocketAddr, UdpSocket},
-    os::fd::FromRawFd,
-    time::SystemTime,
+use crate::cache::{log_query, Cache};
+use crate::config::{Config, FTABSIZ, LOGRATE, TIMEOUT};
+use crate::dnsmasq::{
+    AllAddr, Frec, Header, MySockAddr, Server, F_CONFIG, F_FORWARD, F_IPV4, F_IPV6, F_NEG, F_NOERR,
+    F_NXDOMAIN, F_SERVER, NOERROR, NXDOMAIN, OPT_NODOTS_LOCAL, OPT_NO_NEG, OPT_ORDER, QUERY,
+    SERV_FOR_NODOTS, SERV_HAS_DOMAIN, SERV_LITERAL_ADDRESS, SERV_NO_ADDR, SERV_TYPE,
 };
+use crate::logs::LOG_WARNING;
+use crate::rfc1035::{
+    check_for_bogus_wildcard, extract_addresses, extract_neg_addrs, extract_request, setup_reply,
+};
+use crate::syslog;
+use crate::util::{difftime, hostname_isequal, rand16, socket_is_eq};
 
-#[derive(Clone)]
-pub struct FRec {
-    source: MySockAddr,
-    sentto: Option<Box<Server>>,
-    orig_id: u16,
-    new_id: u16,
-    fd: i32,
-    time: std::time::SystemTime,
-    next: Option<Box<FRec>>,
+lazy_static! {
+    static ref FREC_LIST: Mutex<Vec<Arc<Mutex<Frec>>>> = Mutex::new(Vec::new());
+    static ref FREC_LIST_ID: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 }
+static WARN_TIME: Mutex<SystemTime> = Mutex::new(UNIX_EPOCH);
 
-static mut FREC_LIST: Option<Box<FRec>> = None;
-const OPT_NO_NEG: u32 = 2048;
-const FTABSIZ: usize = 150;
-const LOGRATE: Duration = Duration::from_secs(120);
-const TIMEOUT: Duration = Duration::from_secs(40);
-static mut WARN_TIME: Option<SystemTime> = None;
-const F_NOERR: u32 = 32768;
-
+// 初始化FREC_LIST
 pub fn forward_init(first: bool) {
-    unsafe {
-        // 初始化链表头部
-        if first {
-            FREC_LIST = None; // 首次调用，清空链表
+    // 清空整个id存储列表
+    if let Ok(mut list) = FREC_LIST_ID.lock() {
+        list.clear();
+    }
+    if first {
+        // 清空整个列表
+        if let Ok(mut list) = FREC_LIST.lock() {
+            list.clear();
         }
-
-        // 遍历链表并重置每个节点的 new_id 字段
-        let mut current = &mut FREC_LIST;
-        while let Some(ref mut node) = *current {
-            node.new_id = 0;
-            current = &mut node.next;
+    } else {
+        // 将所有项目的 new_id 设为 0
+        if let Ok(mut list) = FREC_LIST.lock() {
+            for frec in list.iter_mut() {
+                if let Ok(mut frec_guard) = frec.lock() {
+                    frec_guard.new_id = 0;
+                }
+            }
         }
     }
 }
 
-const NOERROR: u8 = 0;
-// 处理DNS查询的响应包，根据响应包中的信息，更新本地缓存，并根据需要发送响应包
-pub fn reply_query(
-    fd: i32,
-    options: u32,
-    packet: &mut Vec<u8>,
-    now: SystemTime,
-    dnamebuff: &mut Vec<u8>,
-    mut last_server: Option<Box<Server>>,
-    bogus_nxdomain: &mut Option<Box<BogusAddr>>,
-    caches: &mut Cache,
-) -> Option<Box<Server>> {
-    let socket = unsafe { UdpSocket::from_raw_fd(fd) };
-    let mut buf = vec![0u8; PACKETSZ];
-    let (n, src_addr) = match socket.recv_from(&mut buf) {
-        Ok((n, addr)) => (n, addr),
-        Err(_) => return last_server, // 如果读取失败，则返回上次的服务器
-    };
-
-    if n < std::mem::size_of::<Header>() {
-        return last_server; // 如果包太小，返回上次的服务器
+// 在id存储表中删除id
+fn delete_frec_list_id(id: u16) {
+    if let Ok(mut list) = FREC_LIST_ID.lock() {
+        list.retain(|&x| x != id);
     }
+}
 
-    // 将数据转换为 Header 结构
-    let header = match Header::from_bytes(&buf[..12]) {
-        Some(h) => h,
-        None => return last_server, // 如果无法解析数据包头，返回上次的服务器
-    };
-    let header_option = Some(header);
-
-    if header.qr == 1 {
-        if let Some(forward) = unsafe { lookup_frec(header.id) } {
-            if header.rcode == NOERROR || header.rcode == NXDOMAIN {
-                if let Some(server) = &forward.sentto {
-                    if server.domain.is_none() {
-                        last_server = Some(forward.sentto.clone()?);
-                    }
+/*
+ * Delete all forward records received from socket fd
+ * 删除从套接字fd收到的所有转发记录
+ */
+pub fn reap_forward(socket: &Socket) {
+    // 假设 frec_list 是全局的 Mutex<Vec<Frec>>
+    if let Ok(mut list) = FREC_LIST.lock() {
+        for frec in list.iter_mut() {
+            if let Ok(mut frec_guard) = frec.lock() {
+                if socket_is_eq(&frec_guard.socket, socket) {
+                    // 在id存储表中删除id
+                    delete_frec_list_id(frec_guard.new_id);
+                    frec_guard.new_id = 0;
                 }
+            }
+        }
+    }
+}
 
-                if header.opcode == QUERY {
-                    if !(bogus_nxdomain.is_some()
-                        && header.rcode == NOERROR
-                        && check_for_bogus_wildcard(
-                            &header_option,
-                            n,
-                            dnamebuff,
-                            bogus_nxdomain,
-                            now,
-                            caches,
-                        ))
+pub struct ForwardQueryArgs<'a> {
+    pub cache: &'a mut Cache,
+    pub udpfd: Socket,
+    pub udpaddr: MySockAddr,
+    pub packet: &'a mut [u8],
+    pub options: u32,
+    pub servers: Option<Box<Server>>,
+    pub last_server: &'a Option<Box<Server>>,
+    pub now: SystemTime,
+    pub local_ttl: u32,
+}
+
+pub fn forward_query(args: ForwardQueryArgs<'_>) -> Option<Box<Server>> {
+    let ForwardQueryArgs {
+        cache,
+        udpfd,
+        udpaddr,
+        packet,
+        options,
+        servers,
+        last_server,
+        now,
+        local_ttl,
+    } = args;
+    let mut forward: Option<Arc<Mutex<Frec>>>;
+    let mut domain: String = String::new();
+    let mut typ: u32 = 0;
+    let mut flags: u16 = 0;
+    let mut addrp: Option<AllAddr> = None;
+    let (gotname, dnamebuff) = extract_request(packet);
+
+    // 解析头数据
+    let mut header = Header::parse(packet).unwrap();
+
+    forward = lookup_frec_by_sender(header.id, udpaddr); // 不转发
+    if !header.rd || servers.is_none() {
+        forward = None;
+    } else if let Some(ref forward) = forward {
+        if let Ok(mut frec) = forward.lock() {
+            if let Some(sentto) = &frec.sent_to {
+                domain = sentto.domain.clone();
+                typ = sentto.flags & SERV_TYPE;
+            } else {
+                println!("forward_query sentto faild");
+            }
+            if let Some(current_server) = frec.sent_to.clone() {
+                frec.sent_to = current_server.next;
+                if frec.sent_to.is_none() {
+                    frec.sent_to = servers.clone();
+                }
+            }
+        }
+    } else {
+        if gotname != 0 {
+            let namelen: usize = dnamebuff.len();
+            let mut matchlen: usize = 0;
+            let mut current = servers.clone();
+            while let Some(serv) = current {
+                if serv.flags & SERV_FOR_NODOTS != 0
+                    && typ != SERV_HAS_DOMAIN
+                    && dnamebuff.contains('.')
+                {
+                    if serv.flags & SERV_LITERAL_ADDRESS != 0 {
+                        let sflag = if serv.addr.is_ipv4() { F_IPV4 } else { F_IPV6 };
+
+                        if sflag & gotname != 0 {
+                            typ = SERV_FOR_NODOTS;
+                            flags = sflag;
+                            addrp = Some(serv.addr.ip());
+                        }
+                    } else {
+                        flags = 0;
+                    }
+                } else if serv.flags & SERV_HAS_DOMAIN != 0 {
+                    let domainlen = serv.domain.len();
+                    if namelen >= domainlen
+                        && hostname_isequal(&dnamebuff[namelen - domainlen..], &serv.domain)
+                        && domainlen > matchlen
                     {
-                        if header.rcode == NOERROR && header.ancount != 0 {
-                            extract_addresses(caches, &header_option, n, dnamebuff, now);
-                        } else if (options & OPT_NO_NEG) == 0 {
-                            extract_neg_addrs(caches, &header_option, n, dnamebuff, now);
+                        if serv.flags & SERV_LITERAL_ADDRESS != 0 {
+                            let sflag = if serv.addr.is_ipv4() { F_IPV4 } else { F_IPV6 };
+
+                            if sflag & gotname != 0 {
+                                typ = SERV_HAS_DOMAIN;
+                                flags = sflag;
+                                domain = serv.domain.clone();
+                                matchlen = domainlen;
+                                addrp = Some(serv.addr.ip());
+                            }
+                        } else {
+                            flags = 0;
+                            domain = serv.domain.clone();
+                            matchlen = domainlen;
                         }
                     }
                 }
+
+                current = serv.next;
             }
+        }
 
-            // 恢复原始请求 ID
-            let orig_id = forward.orig_id;
-            let mut header_mut = header;
-            header_mut.id = orig_id;
+        if flags != 0 && addrp.is_some() {
+            log_query(cache, F_CONFIG | F_FORWARD | flags, &dnamebuff, addrp);
+        } else if gotname != 0 && options & OPT_NODOTS_LOCAL != 0 && !dnamebuff.contains('.') {
+            flags = F_NXDOMAIN;
+        } else {
+            forward = get_new_frec(now);
+            if forward.is_none() {
+                flags = F_NEG;
+            }
+        }
 
-            // 删除 TC 标志位
-            header_mut.tc = 0;
+        // 记录向上游转发的转发信息
+        if let Some(ref forward) = forward {
+            if let Ok(mut cur_forward) = forward.lock() {
+                if typ != 0 || options & OPT_ORDER != 0 {
+                    cur_forward.sent_to = servers.clone(); // 严格顺序模式或特定服务器
+                } else {
+                    cur_forward.sent_to = last_server.clone(); // 使用上次成功的服务器
+                }
 
-            // 重新写入数据包
-            let header_bytes = header_mut.to_bytes();
-            packet.splice(0..12, header_bytes);
+                cur_forward.source = udpaddr;
+                let id = get_id();
+                let mut frec_list_id = FREC_LIST_ID.lock().unwrap();
+                cur_forward.new_id = id;
+                frec_list_id.push(id);
+                cur_forward.socket = udpfd.try_clone().expect("Failed to clone udpfd");
+                cur_forward.orig_id = header.id;
+                header.id = cur_forward.new_id;
+            }
+        }
+    }
 
-            // 发送数据包
-            let _ = socket.send_to(&packet[..n], src_addr);
+    if flags == 0 && forward.is_some() {
+        if let Some(ref forward_arc) = forward {
+            if let Ok(mut forward_guard) = forward_arc.lock() {
+                let firstsentto = forward_guard.sent_to.clone();
 
-            // 使用可变引用修改 new_id
-            forward.new_id = 0; // 取消新 ID
+                loop {
+                    let logflags;
+                    if let Some(sentto) = &forward_guard.sent_to {
+                        if sentto.addr.is_ipv4() {
+                            logflags = F_SERVER | F_IPV4 | F_FORWARD;
+                            addrp = Some(sentto.addr.ip());
+                        } else {
+                            logflags = F_SERVER | F_IPV6 | F_FORWARD;
+                            addrp = Some(sentto.addr.ip());
+                        }
+
+                        if typ == (sentto.flags & SERV_TYPE) && typ != SERV_HAS_DOMAIN
+                            || hostname_isequal(&domain, &sentto.domain)
+                        {
+                            if sentto.flags & SERV_NO_ADDR != 0 {
+                                flags = F_NOERR;
+                            } else if sentto.flags & SERV_LITERAL_ADDRESS == 0 {
+                                // 数据发送到客户端，使用客户端的socket链接
+                                if let Some(sfd) = &sentto.sfd {
+                                    if let Ok(forward_addr) = sfd.socket.try_clone() {
+                                        let forward_addr: UdpSocket = forward_addr.into();
+                                        let header_bytes = header.to_bytes();
+                                        packet[..12].copy_from_slice(&header_bytes);
+                                        let _ = forward_addr.send_to(packet, sentto.addr);
+                                    }
+                                    let name = if gotname != 0 {
+                                        dnamebuff.clone()
+                                    } else {
+                                        "query".to_string()
+                                    };
+                                    log_query(cache, logflags, &name, addrp);
+                                    if !domain.is_empty() {
+                                        return last_server.clone();
+                                    } else if sentto.next.is_some() {
+                                        return sentto.next.clone();
+                                    } else {
+                                        return servers;
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(current_server) = forward_guard.sent_to.clone() {
+                            forward_guard.sent_to = current_server.next;
+                            if forward_guard.sent_to.is_none() {
+                                forward_guard.sent_to = servers.clone();
+                            }
+
+                            // Compare using pointer equality or check if both are None/Some
+                            match (&forward_guard.sent_to, &firstsentto) {
+                                (Some(a), Some(b)) if std::ptr::eq(a.as_ref(), b.as_ref()) => break,
+                                (None, None) => break,
+                                _ => (),
+                            }
+                        }
+                    }
+                }
+
+                header.id = forward_guard.orig_id;
+                delete_frec_list_id(forward_guard.new_id); // 删除列表中的id
+                forward_guard.new_id = 0;
+            }
+        }
+    }
+
+    let send_packet = setup_reply(packet, addrp, flags, local_ttl);
+    // let send_packet = &packet[..qlen];
+    // 数据发送到客户端，使用客户端的socket链接
+    if let Ok(forward_addr) = udpfd.try_clone() {
+        let forward_addr: UdpSocket = forward_addr.into();
+        let _ = forward_addr.send_to(&send_packet, udpaddr);
+    }
+
+    if flags & (F_NOERR | F_NXDOMAIN) != 0 {
+        log_query(
+            cache,
+            F_CONFIG | F_FORWARD | F_NEG | gotname | (flags & F_NXDOMAIN),
+            &dnamebuff,
+            None,
+        );
+    }
+    last_server.clone()
+}
+
+pub fn reply_query(
+    caches: &mut Cache,
+    config: &mut Config,
+    socket: Socket, // 上游服务器的socket链接
+    now: SystemTime,
+    mut last_server: Option<Box<Server>>,
+) -> Option<Box<Server>> {
+    let mut packet: [u8; 1024] = [0; 1024];
+
+    // 从上游服务器接收数据
+    let udpsocket: UdpSocket = socket.into(); // 转换为udpsocket，用于方便接受数据
+    let (n, _) = match udpsocket.recv_from(&mut packet) {
+        Ok((n, addr)) => (n, addr),
+        Err(_) => {
+            return last_server;
+        }
+    };
+
+    let mut header = match Header::parse(&packet[..12]) {
+        Ok(header) => header,
+        Err(_) => return last_server,
+    };
+
+    if header.qr {
+        if let Some(forward_arc) = lookup_frec(header.id) {
+            if header.rcode == NOERROR || header.rcode == NXDOMAIN {
+                let forward = forward_arc.lock().unwrap();
+                if let Some(sentto) = &forward.sent_to {
+                    if sentto.domain.is_empty() {
+                        last_server = Some(sentto.clone());
+                    }
+                }
+
+                if header.opcode == QUERY
+                    && !(!config.bogus_addr.is_empty()
+                        && header.rcode == NOERROR
+                        && check_for_bogus_wildcard(caches, &mut packet, &config.bogus_addr, now)
+                            != 0)
+                {
+                    header = Header::parse(&packet[..12]).unwrap(); // check_for_bogus_wildcard函数改变了header的数值，所以需要重新解析一下
+
+                    if header.rcode == NOERROR && header.ancount != 0 {
+                        extract_addresses(caches, &packet, now);
+                    } else if config.options & OPT_NO_NEG == 0 {
+                        extract_neg_addrs(caches, &packet, now);
+                    }
+                }
+                header = Header::parse(&packet[..12]).unwrap(); // 获取header被修改后的信息。在重新修改header
+                header.id = forward.orig_id;
+                header.tc = false;
+
+                // 重新写入数据包
+                let header_bytes = header.to_bytes();
+                packet[..12].copy_from_slice(header_bytes.as_slice());
+
+                // 数据发送到客户端，使用客户端的socket链接
+                if let Ok(forward_addr) = forward.socket.try_clone() {
+                    let forward_addr: UdpSocket = forward_addr.into();
+                    let _ = forward_addr.send_to(&packet[..n], forward.source);
+                }
+            }
         }
     }
 
     last_server
 }
 
-pub unsafe fn lookup_frec(id: u16) -> Option<&'static mut FRec> {
-    let mut current = FREC_LIST.as_mut();
+// 管理和分配转发记录
+fn get_new_frec(now: SystemTime) -> Option<Arc<Mutex<Frec>>> {
+    let mut frec_list = FREC_LIST.lock().unwrap();
+    let mut oldtime = now;
+    let mut oldest: Option<&Arc<Mutex<Frec>>> = None;
+    let mut count: u32 = 0;
+    let mut warntime = WARN_TIME.lock().unwrap();
 
-    while let Some(frec) = current {
-        if frec.new_id == id {
-            return Some(frec);
+    for f in frec_list.iter() {
+        if let Ok(frec) = f.lock() {
+            if frec.new_id == 0 {
+                // 需要重新获取可变引用以修改时间
+                if let Ok(mut frec_mut) = f.lock() {
+                    frec_mut.time = now;
+                }
+                return Some(Arc::clone(f));
+            }
+
+            if difftime(frec.time, oldtime) <= 0 {
+                oldtime = frec.time;
+                oldest = Some(f);
+            }
+            count += 1;
         }
-        current = frec.next.as_mut().map(|f| f);
+    }
+
+    if let Some(old_arc) = oldest {
+        if difftime(now, oldtime) > TIMEOUT as i64 {
+            // 需要获取可变引用以修改时间
+            if let Ok(mut old_frec) = old_arc.lock() {
+                old_frec.time = now;
+            }
+            return Some(Arc::clone(old_arc));
+        }
+    }
+
+    // // 超过最大记录数
+    if count > FTABSIZ {
+        // 限制日志记录速率，这样syslog日志也不会被DOSed
+        if *warntime == UNIX_EPOCH || difftime(now, *warntime) > LOGRATE {
+            *warntime = now;
+            syslog!(
+                LOG_WARNING,
+                "forwarding table overflow: check for server loops."
+            );
+        }
+        return None;
+    }
+
+    // 新建一个存储项
+    let new: Frec = Frec {
+        time: now,
+        ..Default::default()
+    };
+
+    let new_arc = Arc::new(Mutex::new(new));
+    frec_list.push(Arc::clone(&new_arc));
+    Some(new_arc)
+}
+
+// 在frec_list中查询 id是否已经被占用
+fn lookup_frec(id: u16) -> Option<Arc<Mutex<Frec>>> {
+    if let Ok(frec_list) = FREC_LIST.lock() {
+        for frec in frec_list.iter() {
+            if let Ok(f) = frec.lock() {
+                if f.new_id == id {
+                    return Some(Arc::clone(frec));
+                }
+            }
+        }
     }
 
     None
 }
 
-pub unsafe fn forward_query(
-    udp_socket: i32,
-    udp_addr: &MySockAddr,
-    header: &mut Option<Header>,
-    plen: usize,
-    options: u32,
-    mut dnamebuff: &mut Vec<u8>,
-    servers: &mut Option<Box<option::Server>>,
-    last_server: Option<Box<option::Server>>,
-    now: SystemTime,
-    local_ttl: u64,
-) -> Option<Box<Server>> {
-    let mut forward: Option<Box<FRec>> = None;
-    let mut domain: Option<String> = None;
-    let mut flags: u32 = 0;
-    let mut type_ = 0;
-
-    // 提取请求中的信息
-    let gotname = extract_request(header, plen.try_into().unwrap(), dnamebuff);
-
-    let header = match header {
-        Some(ref mut hdr) => hdr, // 如果存在，解引用
-        None => {
-            // 如果 header 为空，直接返回 None
-            return None;
-        }
-    };
-    let header_bytes = header_to_bytes(*header);
-    // 递归未启用或没有可用服务器
-    if header.rd == 0 || servers.is_none() {
-        forward = None;
-    }
-    // 检查是否有已有的转发记录
-    if let Some(existing_forward) = lookup_frec_by_sender(header.id, udp_addr) {
-        forward = Some(existing_forward);
-        if let Some(ref mut fwd) = forward {
-            fwd.sentto = fwd
-                .sentto
-                .as_mut()
-                .and_then(|s| s.next.clone())
-                .or(servers.clone());
-            header.id = fwd.new_id;
-        }
-    } else {
-        // 如果没有转发记录，查找匹配的服务器
-        if gotname {
-            let namelen = dnamebuff.len();
-            let mut matchlen = 0;
-            let current_server = servers.as_deref();
-            while let Some(serv) = current_server {
-                // 检查是否为 NODOTS 匹配
-                if (serv.flags & SERV_FOR_NODOTS) != 0
-                    && (serv.flags & SERV_HAS_DOMAIN) == 0
-                    && !dnamebuff.contains(&b'.')
-                {
-                    if (serv.flags & SERV_LITERAL_ADDRESS) != 0 {
-                        let sflag = if serv.addr.sa.sa_family == 2 {
-                            F_IPV4
-                        } else {
-                            F_IPV6
-                        };
-                        if sflag != 0 {
-                            type_ = SERV_FOR_NODOTS;
-                            flags = sflag;
-                        }
-                    } else {
-                        flags = 0;
-                    }
-                } else if (serv.flags & SERV_HAS_DOMAIN) != 0 {
-                    if let Some(serv_domain) = &serv.domain {
-                        let domainlen = serv_domain.len();
-                        if namelen >= domainlen
-                            && dnamebuff[namelen - domainlen..]
-                                .eq_ignore_ascii_case(serv_domain.as_bytes())
-                            && domainlen > matchlen
-                        {
-                            if (serv.flags & SERV_LITERAL_ADDRESS) != 0 {
-                                let sflag = if serv.addr.sa.sa_family == AF_INET {
-                                    F_IPV4
-                                } else {
-                                    F_IPV6
-                                };
-                                if sflag != 0 {
-                                    domain = Some(serv_domain.clone());
-                                    flags = sflag;
-                                    matchlen = domainlen;
-                                }
-                            } else {
-                                domain = Some(serv_domain.clone());
-                                matchlen = domainlen;
-                            }
-                        }
-                    }
+// 根据发送者 查找frec
+fn lookup_frec_by_sender(id: u16, addr: MySockAddr) -> Option<Arc<Mutex<Frec>>> {
+    if let Ok(frec_list) = FREC_LIST.lock() {
+        for frec in frec_list.iter() {
+            if let Ok(f) = frec.lock() {
+                if f.new_id != 0 && f.orig_id == id && f.source == addr {
+                    return Some(Arc::clone(frec));
                 }
             }
         }
-        if gotname && (options & OPT_NODOTS_LOCAL != 0) && !dnamebuff.contains(&b'.') {
-            flags = F_NXDOMAIN; // 设置 NXDOMAIN 标志
-        }
-
-        if let Some(new_frec) = get_new_frec(now) {
-            if let Some(ref fwd) = forward {
-                // 比较两者的指针地址，或者根据业务逻辑比较具体字段
-                if std::ptr::eq(&**fwd, &*new_frec) {
-                    flags = F_NEG;
-                }
-            }
-            forward = Some(new_frec);
-        }
-
-        // 如果成功获取转发记录，设置转发参数
-        if let Some(ref mut fwd) = forward {
-            // 检查是否使用严格顺序或特定服务器顺序
-            if options & OPT_ORDER != 0 || fwd.sentto.is_some() {
-                fwd.sentto = servers.clone();
-            } else {
-                fwd.sentto = last_server.clone();
-            }
-
-            fwd.source = *udp_addr;
-            fwd.new_id = get_id(); // 生成新 ID
-            fwd.orig_id = header.id;
-            header.id = fwd.new_id; // 更新 header 的 ID
-        }
     }
-
-    if flags == 0 {
-        if let Some(ref mut forward) = forward.as_mut() {
-            let first_sentto = forward.sentto.clone();
-            loop {
-                if let Some(sentto) = forward.sentto.as_ref() {
-                    if type_ == (sentto.flags & SERV_TYPE)
-                        && (type_ != SERV_HAS_DOMAIN
-                            || (domain.is_some()
-                                && sentto.domain.is_some()
-                                && hostname_isequal(
-                                    &domain.clone().unwrap(),
-                                    sentto.domain.as_ref().unwrap(),
-                                )))
-                    {
-                        if sentto.flags & SERV_NO_ADDR != 0 {
-                            flags = F_NOERR;
-                        } else if sentto.flags & SERV_LITERAL_ADDRESS == 0 {
-                            if let Some(sfd) = &sentto.sfd {
-                                // 使用 send_query 函数来发送数据
-                                if send_query(
-                                    sfd.fd,
-                                    header_bytes,
-                                    extract_socket_addr(&sentto.addr),
-                                )
-                                .is_ok()
-                                {
-                                    return if domain.is_some() {
-                                        last_server
-                                    } else {
-                                        sentto.next.clone()
-                                    };
-                                }
-                            }
-                        }
-                    }
-                }
-                if let Some(sentto) = &forward.sentto {
-                    // 尝试将 `forward.sentto` 设置为 `sentto.next`
-                    forward.sentto = sentto.next.clone();
-
-                    // 如果 `sentto.next` 为 `None`，设置为 `servers`
-                    if forward.sentto.is_none() {
-                        forward.sentto = servers.clone();
-                    }
-                }
-
-                // 检查是否回到了第一个节点
-                if let Some(ref current_sentto) = forward.sentto {
-                    if let Some(first_sentto) = first_sentto.as_deref() {
-                        if std::ptr::eq(current_sentto.as_ref(), first_sentto) {
-                            break;
-                        }
-                    }
-                }
-            }
-            header.id = forward.orig_id.to_be();
-            forward.new_id = 0;
-        }
-    }
-    // let plen = setup_reply(header, plen, addrp, flags, local_ttl);
-    let _ = send_query(udp_socket, header_bytes, extract_socket_addr(udp_addr));
-
-    last_server
+    None
 }
 
-fn header_to_bytes(header: Header) -> &'static [u8] {
-    unsafe {
-        std::slice::from_raw_parts(
-            &header as *const Header as *const u8,
-            std::mem::size_of::<Header>(),
-        )
-    }
-}
-
-// 发送udp协议查询请求
-pub fn send_query(fd: i32, header: &[u8], addr: SocketAddr) -> Result<(), std::io::Error> {
-    // 将 i32 文件描述符转换为临时 UdpSocket
-    let socket = unsafe { UdpSocket::from_raw_fd(fd) };
-
-    // 发送数据
-    let result = socket.send_to(header, addr);
-
-    // 避免文件描述符被 Drop 关闭，重新使用文件描述符而不销毁它
-    std::mem::forget(socket);
-
-    result.map(|_| ())
-}
-
-// 提取ip地址和端口
-pub fn extract_socket_addr(addr: &MySockAddr) -> SocketAddr {
-    unsafe {
-        if addr.sa.sa_family == AF_INET {
-            // IPv4 地址
-            let addr_in = unsafe { addr.in_ };
-            let addr_u32 = NetworkEndian::read_u32(&addr_in.sin_addr.s_addr.to_be_bytes());
-            let ip = Ipv4Addr::from(addr_u32);
-            let port = u16::from_be(addr_in.sin_port);
-            SocketAddr::new(std::net::IpAddr::V4(ip), port)
-        } else if addr.sa.sa_family == AF_INET6 {
-            let ipv6 = addr.in6;
-            let ip = std::net::Ipv6Addr::from(ipv6.sin6_addr.s6_addr);
-            let port = u16::from_be(ipv6.sin6_port);
-            SocketAddr::new(std::net::IpAddr::V6(ip), port)
-        } else {
-            panic!("Unsupported address family");
-        }
-    }
-}
-
-pub fn get_id() -> u16 {
+// 返回1到65535之间唯一的随机id
+fn get_id() -> u16 {
+    let frec_list_id = FREC_LIST_ID.lock().unwrap();
     let mut ret: u16 = 0;
 
     while ret == 0 {
         ret = rand16();
 
-        // 如果 ID 已经存在于链表中，重新生成
-        if ret != 0 && unsafe { lookup_frec(ret).is_some() } {
+        if ret != 0 && frec_list_id.contains(&ret) {
             ret = 0;
         }
     }
@@ -406,90 +473,206 @@ pub fn get_id() -> u16 {
     ret
 }
 
-// 从缓存中获取一个可用的 FRec 结构体
-pub fn get_new_frec(now: SystemTime) -> Option<Box<FRec>> {
-    unsafe {
-        let mut f = FREC_LIST.as_mut();
-        let mut oldest: Option<Box<FRec>> = None;
-        let mut oldtime = now;
-        let mut count = 0;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::SystemTime;
 
-        // 遍历链表
-        while let Some(frec) = f {
-            if frec.new_id == 0 {
-                frec.time = now;
-                return Some(frec.clone());
-            }
+    #[test]
+    fn test_lookup_frec_empty_list() {
+        // 测试空列表的情况
+        forward_init(true); // 清空列表
+        let result = lookup_frec(123);
+        assert!(result.is_none(), "Should return None for empty list");
+    }
 
-            if frec.time <= oldtime {
-                oldtime = frec.time;
-                oldest = Some(frec.clone());
-            }
+    #[test]
+    fn test_lookup_frec_not_found() {
+        // 测试查找不存在的ID
+        forward_init(true); // 清空列表
 
-            count += 1;
+        // 添加一些测试记录
+        let frec1 = Frec {
+            time: SystemTime::now(),
+            new_id: 100,
+            orig_id: 50,
+            source: MySockAddr::from(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 53)),
+            socket: Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap(),
+            sent_to: None,
+            // next: None,
+        };
 
-            // 获取下一节点
-            f = frec.next.as_mut();
+        let frec2 = Frec {
+            time: SystemTime::now(),
+            new_id: 200,
+            orig_id: 150,
+            source: MySockAddr::from(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 53)),
+            socket: Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap(),
+            sent_to: None,
+            // next: None,
+        };
+
+        // 手动添加到列表
+        if let Ok(mut list) = FREC_LIST.lock() {
+            list.push(Arc::new(Mutex::new(frec1)));
+            list.push(Arc::new(Mutex::new(frec2)));
         }
 
-        // 如果没有空闲记录，复用最旧记录
-        if let Some(mut oldest_frec) = oldest {
-            if now.duration_since(oldest_frec.time).unwrap_or_default() > TIMEOUT {
-                oldest_frec.time = now;
-                return Some(oldest_frec);
+        // 查找不存在的ID
+        let result = lookup_frec(300);
+        assert!(result.is_none(), "Should return None for non-existent ID");
+
+        // 查找存在的ID
+        let result = lookup_frec(100);
+        assert!(result.is_some(), "Should find record with ID 100");
+
+        let result = lookup_frec(200);
+        assert!(result.is_some(), "Should find record with ID 200");
+    }
+
+    #[test]
+    fn test_lookup_frec_multiple_records() {
+        // 测试多个记录的情况
+        forward_init(true); // 清空列表
+
+        // 添加多个记录
+        for i in 1..=5 {
+            let frec = Frec {
+                time: SystemTime::now(),
+                new_id: i * 100,
+                orig_id: i * 50,
+                source: MySockAddr::from(SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                    53,
+                )),
+                socket: Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap(),
+                sent_to: None,
+                // next: None,
+            };
+
+            if let Ok(mut list) = FREC_LIST.lock() {
+                list.push(Arc::new(Mutex::new(frec)));
             }
         }
 
-        // 如果记录数超出限制，记录日志并返回 None
-        if count > FTABSIZ {
-            if WARN_TIME.is_none()
-                || now.duration_since(WARN_TIME.unwrap()).unwrap_or_default() > LOGRATE
+        // 测试查找每个记录
+        for i in 1..=5 {
+            let result = lookup_frec(i * 100);
+            assert!(result.is_some(), "Should find record with ID {}", i * 100);
+        }
+
+        // 测试查找不存在的记录
+        let result = lookup_frec(999);
+        assert!(
+            result.is_none(),
+            "Should return None for non-existent ID 999"
+        );
+    }
+
+    #[test]
+    fn test_lookup_frec_zero_id() {
+        // 测试ID为0的情况（通常表示未分配）
+        forward_init(true); // 清空列表
+
+        // 添加一个new_id为0的记录
+        let frec = Frec {
+            time: SystemTime::now(),
+            new_id: 0, // 未分配的ID
+            orig_id: 100,
+            source: MySockAddr::from(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 53)),
+            socket: Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap(),
+            sent_to: None,
+            // next: None,
+        };
+
+        if let Ok(mut list) = FREC_LIST.lock() {
+            list.push(Arc::new(Mutex::new(frec)));
+        }
+
+        // 查找ID为0的记录 - 应该能找到，因为lookup_frec会匹配new_id == 0
+        let result = lookup_frec(0);
+        assert!(
+            result.is_some(),
+            "Should find record with ID 0 (unassigned records are still in the list)"
+        );
+    }
+
+    #[test]
+    fn test_get_id_avoids_duplicates() {
+        // 测试避免重复ID的功能
+        forward_init(true); // 清空列表
+
+        // 预填充一些ID到列表中
+        {
+            let mut frec_list_id = FREC_LIST_ID.lock().unwrap();
+            frec_list_id.clear();
+            frec_list_id.push(100);
+            frec_list_id.push(200);
+            frec_list_id.push(300);
+        }
+
+        // 生成多个ID，确保不会生成已存在的ID
+        for _ in 0..50 {
+            let id = get_id();
+
+            // 验证ID不是已存在的ID
+            assert_ne!(id, 100, "Should not generate ID 100");
+            assert_ne!(id, 200, "Should not generate ID 200");
+            assert_ne!(id, 300, "Should not generate ID 300");
+        }
+    }
+
+    #[test]
+    fn test_get_id_never_zero() {
+        // 测试生成的ID永远不会是0
+        forward_init(true); // 清空列表
+        {
+            let mut frec_list_id = FREC_LIST_ID.lock().unwrap();
+            frec_list_id.clear();
+        }
+
+        // 生成多个ID，确保没有0
+        for _ in 0..100 {
+            let id = get_id();
+            assert_ne!(id, 0, "Generated ID should never be 0");
+        }
+    }
+
+    #[test]
+    fn test_get_id_with_full_list() {
+        // 测试当列表几乎满时的情况
+        forward_init(true); // 清空列表
+
+        // 预填充几乎所有的ID
+        {
+            let mut frec_list_id = FREC_LIST_ID.lock().unwrap();
+            frec_list_id.clear();
+
+            // 添加除少数ID外的所有ID
+            for i in 1..=65534 {
+                if i != 5000 && i != 10000 && i != 15000 {
+                    frec_list_id.push(i);
+                }
+            }
+        }
+
+        // 生成多个ID，应该能成功生成可用的ID
+        for _ in 0..3 {
+            let id = get_id();
+
+            // 验证ID是预留给用的ID之一
+            assert!(
+                id == 5000 || id == 10000 || id == 15000 || id == 65535,
+                "Generated ID should be one of the available IDs, got {}",
+                id
+            );
+
+            // 将生成的ID添加到列表中，模拟实际使用
             {
-                WARN_TIME = Some(now);
+                let mut frec_list_id = FREC_LIST_ID.lock().unwrap();
+                frec_list_id.push(id);
             }
-            return None;
         }
-
-        // 如果没有找到合适的记录，则分配新的记录
-        let new_frec = Box::new(FRec {
-            source: MySockAddr::default(),
-            sentto: None,
-            orig_id: 0,
-            new_id: 0,
-            fd: -1,
-            time: now,
-            next: FREC_LIST.clone(),
-        });
-
-        // 更新链表头
-        FREC_LIST = Some(new_frec.clone());
-
-        // 返回新分配的记录
-        Some(new_frec)
-    }
-}
-
-pub fn lookup_frec_by_sender(id: u16, addr: &MySockAddr) -> Option<Box<FRec>> {
-    // 遍历链表寻找匹配的 FRec
-    let mut current = unsafe { FREC_LIST.as_ref() };
-    while let Some(frec) = current {
-        if frec.new_id != 0 && frec.orig_id == id && sockaddr_isequal(&frec.source, addr) {
-            return Some(frec.clone());
-        }
-        current = frec.next.as_ref();
-    }
-
-    // 如果没有匹配，返回默认值
-    None
-}
-
-pub fn reap_forward(fd: i32) {
-    let mut current = unsafe { FREC_LIST.as_mut() };
-
-    while let Some(f) = current {
-        if f.fd == fd {
-            f.new_id = 0; // 重置 new_id 字段
-        }
-        current = f.next.as_mut(); // 移动到下一个节点
     }
 }
