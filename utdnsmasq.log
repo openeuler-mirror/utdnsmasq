@@ -1,6 +1,0 @@
-[32m[INFO][0m [33m2024-12-13 16:02:14[0m [31mmain.rs 457[0m [34m:started, version 2.0, cachesize 150[0m
-[32m[INFO][0m [33m2024-12-13 16:02:14[0m [31mmain.rs 468[0m [34m:serving MX record for local hosts target None[0m
-[32m[WARN][0m [33m2024-12-13 16:02:14[0m [31mmain.rs 498[0m [34m:failed to drop root privs for user[0m
-[32m[INFO][0m [33m2024-12-13 16:02:14[0m [31mnetwork.rs 595[0m [34m:Using nameserver 16885952:13568#13568[0m
-[32m[INFO][0m [33m2024-12-13 16:02:14[0m [31mnetwork.rs 595[0m [34m:Using nameserver 67373064:13568#13568[0m
-[32m[INFO][0m [33m2024-12-13 16:02:14[0m [31mnetwork.rs 595[0m [34m:Using nameserver 134744072:13568#13568[0m
