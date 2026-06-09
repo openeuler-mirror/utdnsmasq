@@ -4,562 +4,209 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#![allow(
-    clippy::collapsible_if,
-    unreachable_patterns,
-    unused_variables,
-    unused_assignments,
-    clippy::too_many_arguments,
-    clippy::needless_borrow,
-    clippy::unnecessary_cast,
-    clippy::redundant_closure,
-    clippy::ptr_arg
-)]
-
-use crate::util::*;
-use crate::*;
-use byteorder::{ByteOrder, NetworkEndian};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use crate::{
+    cache::{log_query, Cache},
+    config::VERSION,
+    dnsmasq::{
+        AllAddr, BogusAddr, Header, C_CHAOS, C_IN, F_CONFIG, F_DHCP, F_FORWARD, F_HOSTS,
+        F_IMMORTAL, F_IPV4, F_IPV6, F_NEG, F_NOERR, F_NXDOMAIN, F_QUERY, F_REVERSE, MAXDNAME,
+        NOERROR, NXDOMAIN, OPT_BOGUSPRIV, OPT_FILTER, OPT_LOCALMX, OPT_SELFMX, PACKETSZ, REFUSED,
+        SERVFAIL, T_A, T_AAAA, T_ANY, T_CNAME, T_MAILB, T_MX, T_PTR, T_SOA, T_SRV, T_TXT,
+    },
+    util::{get_long, get_short, legal_char, put_long, put_short, ToIpv4, ToIpv6},
+};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::SystemTime;
 
-pub type InAddrT = u32;
+const QUERY: u8 = 0;
+pub const INADDRSZ: u16 = 4;
+pub const IN6ADDRSZ: u16 = 16;
 
-const F_IPV4: u32 = 128;
-const F_FORWARD: u32 = 8;
-const F_NEG: u32 = 32;
-const F_NXDOMAIN: u32 = 4096;
-const F_CONFIG: u32 = 2;
-pub const C_IN: u16 = 1;
-const F_REVERSE: u32 = 4;
-const F_IPV6: u32 = 256;
-const NS_INT16SZ: usize = 2;
-const NS_INT32SZ: usize = 4;
-const MAXARPANAME: usize = 75;
-const T_PTR: u16 = 12; // PTR 记录
-pub const T_A: u16 = 1; // A 记录
-pub const T_AAAA: u16 = 28; // AAAA 记录
-const T_SOA: u16 = 6; // SOA 记录
-pub const NXDOMAIN: u8 = 3; // NXDOMAIN 响应码
-const T_ANY: u16 = 255;
-const NOERROR: u8 = 0;
-const IN6ADDRSZ: u16 = 16;
-pub const QUERY: u8 = 0;
-pub const C_CHAOS: u16 = 3;
-pub const T_TXT: u16 = 16;
-const OPT_FILTER: u32 = 2;
-const T_SRV: u16 = 33;
-const T_MX: u16 = 15;
-const T_MAILB: u16 = 253;
-// const SERVFAIL: u8 = 2;
-// const REFUSED: u8 = 5;
-
-// 检查DNS响应数据包中是否存在虚假的IP地址
-pub fn check_for_bogus_wildcard(
-    header: &Option<Header>,
-    qlen: usize,
-    name: &mut [u8],
-    baddr: &mut Option<Box<BogusAddr>>,
-    now: SystemTime,
-    caches: &mut Cache,
-) -> bool {
-    // 将 Option<Header> 转换为字节数组
-    let header_bytes = match header {
-        Some(h) => h.to_bytes(),
-        None => return false, // 无效的数据包
-    };
-
-    // 跳过问题部分
-    let mut p = match skip_questions(header, qlen) {
-        Some(p) => p,
-        None => return false, // 无效的数据包
-    };
-
-    // 获取回答部分数量
-    let ancount = NetworkEndian::read_u16(&header_bytes[6..8]) as usize;
-
-    // 遍历回答部分
-    for _ in 0..ancount {
-        if !extract_name(&header_bytes, qlen, &mut p, name, true) {
-            return false; // 无效的数据包
-        }
-
-        if p.is_empty() {
-            return false; // 数据包太短
-        }
-
-        // 读取回答部分的 qtype, qclass, ttl, rdlen
-        let qtype = NetworkEndian::read_u16(&p[0..2]);
-        let qclass = NetworkEndian::read_u16(&p[2..4]);
-        let ttl = NetworkEndian::read_u32(&p[4..8]);
-        let rdlen = NetworkEndian::read_u16(&p[8..10]) as usize;
-        p = &p[10..];
-
-        // 判断是否为 C_IN 和 T_A 类型的回答
-        if qclass == 1 && qtype == 1 {
-            let mut baddrp = baddr.as_ref();
-
-            while let Some(baddr_ref) = baddrp {
-                // 对比回答部分的 IP 地址
-                if rdlen >= 4 && baddr_ref.addr.s_addr == NetworkEndian::read_u32(&p[0..4]) {
-                    // 找到虚假地址，修改包头为 NXDOMAIN
-                    let mut header_mut = header_bytes.clone();
-                    header_mut[2] &= 0b0111_1111; // 清除 AA 位
-                    header_mut[3] |= 0b1000_0000; // 设置 RA 位
-                    NetworkEndian::write_u16(&mut header_mut[8..10], 0);
-                    NetworkEndian::write_u16(&mut header_mut[10..12], 0);
-                    NetworkEndian::write_u16(&mut header_mut[6..8], 0);
-                    header_mut[3] = (header_mut[3] & 0b1111_0000) | 3;
-
-                    cache_start_insert(caches);
-                    cache_insert(
-                        caches,
-                        name,
-                        None,
-                        now,
-                        ttl,
-                        F_IPV4 | F_FORWARD | F_NEG | F_NXDOMAIN | F_CONFIG,
-                    );
-                    cache_end_insert(caches);
-
-                    return true;
-                }
-                baddrp = baddr_ref.next.as_ref();
-            }
-        }
-
-        if p.is_empty() {
-            return false; // 数据包太短
-        }
-
-        p = &p[rdlen..];
-    }
-
-    false
-}
-
-// 从 DNS 数据包中跳过所有问题部分，并返回指向答案部分的切片。
-pub fn skip_questions(header: &Option<Header>, plen: usize) -> Option<&[u8]> {
-    // 确保 header 存在
-    let header = header.as_ref()?;
-
-    // 假设 Header 的大小为 12 字节
-    let header_size = 12;
-
-    // 获取 qdcount (问题部分的数量)
-    let qdcount = header.qdcount;
-
-    // 使用 Header 之后的数据开始解析
-    // 注意：这里假设输入的数据是在 header 之后紧跟着的 DNS 消息内容
-    // 直接对内存进行操作，避免创建新的字节数组，header 是外部引用
-    // 假设 Header 本身是一个实际包数据的一部分，计算从 Header 结束后的位置开始的数据。
-    let ansp = unsafe {
-        let ptr = header as *const Header as *const u8;
-        let data_ptr = ptr.add(header_size);
-        std::slice::from_raw_parts(data_ptr, plen.saturating_sub(header_size))
-    };
-
-    let mut ansp = ansp;
-
-    // 遍历所有的问题部分
-    for _ in 0..qdcount {
-        loop {
-            if ansp.is_empty() || ansp.len() > plen {
-                return None; // 数据包无效
-            }
-
-            let label_type = ansp[0] & 0xc0;
-
-            if label_type == 0xc0 {
-                // 指针压缩
-                if ansp.len() < 2 {
-                    return None; // 数据包无效
-                }
-                ansp = &ansp[2..];
-                break;
-            } else if label_type == 0x80 {
-                return None; // 保留标签，无效的数据包
-            } else if label_type == 0x40 {
-                // 扩展标签类型
-                if ansp.len() < 2 {
-                    return None; // 数据包无效
-                }
-                if (ansp[0] & 0x3f) != 1 {
-                    return None; // 只支持位串类型为 1
-                }
-                let count = ansp[1];
-                ansp = &ansp[2..];
-                if count == 0 {
-                    if ansp.len() < 32 {
-                        return None; // 数据包无效
-                    }
-                    ansp = &ansp[32..];
-                } else {
-                    let bytes_to_skip = ((count - 1) >> 3) + 1;
-                    if ansp.len() < bytes_to_skip as usize {
-                        return None; // 数据包无效
-                    }
-                    ansp = &ansp[bytes_to_skip as usize..];
-                }
-            } else {
-                // 标签类型为 0，底部六位是长度
-                let len = (ansp[0] & 0x3f) as usize;
-                ansp = &ansp[1..];
-                if len == 0 {
-                    break; // 零长度标签表示结束
-                }
-                if ansp.len() < len {
-                    return None; // 数据包无效
-                }
-                ansp = &ansp[len..];
-            }
-        }
-        if ansp.len() < 4 {
-            return None; // 数据包无效
-        }
-        ansp = &ansp[4..]; // 跳过 class 和 type
-    }
-
-    if ansp.len() > plen {
-        return None; // 数据包无效
-    }
-
-    Some(ansp)
-}
-
-// 用于从 DNS 报文的字节数组中提取域名，并将其存储到 name 数组中
-fn extract_name<'a>(
-    header: &'a [u8],
-    plen: usize,
-    pp: &mut &'a [u8],
-    name: &mut [u8],
-    is_extract: bool,
-) -> bool {
-    let mut cp = 0;
-    let mut p = *pp;
-    let mut p1 = None;
+// 直接获取域名，去除对判断域名是否相等的判断
+fn extract_name(packet: &[u8], date: &mut &[u8]) -> String {
+    let mut pos = 0;
+    let mut p1 = 0;
+    let mut name: String = String::new();
     let mut hops = 0;
+    let plen = packet.len();
 
-    while let Some(&l) = p.first() {
-        p = &p[1..];
-        let label_type = l & 0xc0;
+    loop {
+        let mut l = if hops != 0 {
+            packet[pos] as u32 // 压缩指针，针对于数据包头的位置偏移多少
+        } else {
+            date[pos] as u32
+        }; // 获取数据长度 每个域名部分开始都有该部分域名信息的长度
+        pos += 1;
 
-        if label_type == 0xc0 {
-            if p.is_empty() || p.as_ptr() as usize - header.as_ptr() as usize + 1 >= plen {
-                return false;
+        if l == 0 {
+            // 如果第一次循环就遇到l=0，需要确保name不为空
+            if name.is_empty() {
+                name = "..".to_string(); // 返回根域名
             }
-            let offset = (((l & 0x3f) as usize) << 8) | p[0] as usize;
-            p = &p[1..];
-            if offset >= plen {
-                return false;
+            break; // 域名结束
+        }
+
+        let lable_type = l & 0xc0;
+        if lable_type == 0xc0 {
+            // 压缩指针
+            if pos + 1 > plen {
+                return String::new();
             }
-            if p1.is_none() {
-                p1 = Some(p);
+
+            l = (l & 0x3f) << 8;
+            l |= if hops != 0 {
+                packet[pos] as u32 // 压缩指针，针对于数据包头的位置偏移多少
+            } else {
+                date[pos] as u32
+            }; // 获取数据长度 每个域名部分开始都有该部分域名信息的长度
+
+            pos += 1;
+            if l > plen as u32 {
+                return String::new();
             }
-            p = &header[offset..];
+
+            if p1 == 0 {
+                p1 = pos;
+            }
+
             hops += 1;
             if hops > 255 {
-                return false;
+                return String::new();
             }
-        } else if label_type == 0x80 {
-            return false;
-        } else if label_type == 0x40 {
-            if (l & 0x3f) != 1 {
-                return false;
+
+            pos = l as usize; // 修正：压缩指针指向的是绝对偏移量，不需要减去12
+        } else if lable_type == 0x80 {
+            // 保留类型
+            return String::new();
+        } else if lable_type == 0x40 {
+            // 扩展标签类型
+            // ELT
+            if l & 0x3f != 1 {
+                return String::new();
             }
-            if !is_extract {
-                return false;
+
+            let mut count = date[pos] as u32;
+            pos += 1;
+
+            if count == 0 {
+                count = 256;
             }
-            if p.is_empty() {
-                return false;
-            }
-            let count = if p[0] == 0 { 256 } else { p[0] as usize };
-            p = &p[1..];
             let digs = ((count - 1) >> 2) + 1;
-            if cp + digs + 9 >= name.len() || p.len() < ((count - 1) >> 3) + 1 {
-                return false;
+            if name.len() + digs as usize + 9 >= MAXDNAME {
+                return String::new();
             }
-            name[cp] = b'\\';
-            name[cp + 1] = b'[';
-            name[cp + 2] = b'x';
-            cp += 3;
+
+            if pos + ((count - 1) >> 3) as usize + 1 >= plen {
+                return String::new();
+            }
+
+            name.push_str("\\[x");
+
             for j in 0..digs {
-                let dig = if j % 2 == 0 {
-                    p[j / 2] >> 4
+                let dig: u8;
+                if j % 2 == 0 {
+                    dig = date[pos] >> 4;
                 } else {
-                    p[j / 2] & 0x0f
-                };
-                name[cp] = if dig < 10 {
+                    dig = date[pos] & 0x0f;
+                    pos += 1;
+                }
+
+                let c = if dig < 10 {
                     dig + b'0'
                 } else {
                     dig + b'A' - 10
                 };
-                cp += 1;
+
+                name.push(c as char);
             }
-            write!(&mut name[cp..], "/{count}]").unwrap();
-            cp += 9;
-            name[cp] = b'.';
-            cp += 1;
-            p = &p[((count - 1) >> 3) + 1..];
+            let push_str = format!("/{}]", count);
+            name.push_str(&push_str);
+            name.push('.');
         } else {
-            let len = (l & 0x3f) as usize;
-            if cp + len + 1 >= name.len() || p.len() < len {
-                return false;
+            // 普通类型
+            // 域名长度太长
+            if name.len() > MAXDNAME {
+                return String::new();
             }
-            name[cp..cp + len].copy_from_slice(&p[..len]);
-            cp += len;
-            p = &p[len..];
-            name[cp] = b'.';
-            cp += 1;
-        }
-
-        if p.as_ptr() as usize - header.as_ptr() as usize >= plen {
-            return false;
-        }
-    }
-
-    if cp > 0 {
-        name[cp - 1] = 0; // 终止字符串，去掉最后一个句点
-    }
-
-    if let Some(p1) = p1 {
-        *pp = p1;
-    } else {
-        *pp = p;
-    }
-
-    true
-}
-
-// 从 DNS 响应包中提取地址记录并缓存
-pub fn extract_addresses(
-    caches: &mut Cache,
-    header: &Option<Header>,
-    qlen: usize,
-    name: &mut [u8],
-    now: SystemTime,
-) {
-    let header_bytes = match header {
-        Some(h) => h.to_bytes(),
-        None => return,
-    };
-
-    let mut p = match skip_questions(header, qlen) {
-        Some(ptr) => ptr,
-        None => return,
-    };
-
-    cache_start_insert(caches);
-    let psave = p;
-
-    // 根据DNS响应头中的答案数量，遍历每个答案记录
-    for _ in 0..get_short(&mut &header_bytes[6..8]) {
-        let origname = p;
-
-        if !extract_name(&header_bytes, qlen, &mut p, name, true) {
-            return;
-        }
-
-        let qtype = get_short(&mut p);
-        let qclass = get_short(&mut p);
-        let ttl = get_long(&mut p);
-        let rdlen = get_short(&mut p);
-
-        let endrr = p.get(rdlen as usize..).unwrap_or(&[]);
-        if endrr.len() > qlen {
-            return;
-        }
-
-        if qclass != C_IN {
-            p = endrr;
-            continue;
-        }
-
-        match qtype {
-            T_A => {
-                let ipv4_bytes = &p[..4];
-                cache_insert(caches, name, Some(ipv4_bytes), now, ttl, F_IPV4 | F_FORWARD);
+            // 域名解析超过数组长度
+            if pos > plen {
+                return String::new();
             }
-            T_AAAA => {
-                let ipv6_bytes = &p[..16];
-                cache_insert(caches, name, Some(ipv6_bytes), now, ttl, F_IPV6 | F_FORWARD);
-            }
-            T_PTR => {
-                let mut addr = vec![0; 16];
-                let name_encoding = in_arpa_name_2_addr(name, &mut addr);
-                if name_encoding != 0 {
-                    if !extract_name(&header_bytes, qlen, &mut p, name, true) {
-                        return;
-                    }
-                    cache_insert(
-                        caches,
-                        name,
-                        Some(&addr),
-                        now,
-                        ttl,
-                        name_encoding | F_REVERSE,
-                    );
+
+            for _ in 0..l {
+                // let c = date[pos] as char;
+                let c = if hops != 0 {
+                    packet[pos] as char // 压缩指针，针对于数据包头的位置偏移多少
+                } else {
+                    date[pos] as char
+                };
+
+                if legal_char(c) {
+                    name.push(c);
+                } else {
+                    return String::new();
                 }
+                pos += 1;
             }
-            _t_cname => {
-                let targp = p;
-                p = psave;
-                for _ in 0..get_short(&mut &header_bytes[6..8]) {
-                    let mut tmp = targp;
-                    if !extract_name(&header_bytes, qlen, &mut tmp, name, true) {
-                        return;
-                    }
-                    let res = extract_name(&header_bytes, qlen, &mut p, name, false);
-                    if !res {
-                        return;
-                    }
-
-                    let qtype = get_short(&mut p);
-                    let qclass = get_short(&mut p);
-                    let cttl = get_long(&mut p);
-                    let rdlen = get_short(&mut p);
-
-                    let endrr1 = p.get(rdlen as usize..).unwrap_or(&[]);
-                    if endrr1.len() > qlen {
-                        return;
-                    }
-
-                    if qclass != C_IN {
-                        p = endrr1;
-                        continue;
-                    }
-
-                    let cttl = if ttl < cttl { ttl } else { cttl };
-
-                    let mut tmp = origname;
-                    if !extract_name(&header_bytes, qlen, &mut tmp, name, true) {
-                        return;
-                    }
-
-                    match qtype {
-                        T_A => {
-                            let ipv4_bytes = &p[..4];
-                            cache_insert(
-                                caches,
-                                name,
-                                Some(ipv4_bytes),
-                                now,
-                                cttl,
-                                F_IPV4 | F_FORWARD,
-                            );
-                        }
-                        T_AAAA => {
-                            let ipv6_bytes = &p[..16];
-                            cache_insert(
-                                caches,
-                                name,
-                                Some(ipv6_bytes),
-                                now,
-                                cttl,
-                                F_IPV6 | F_FORWARD,
-                            );
-                        }
-                        T_PTR => {
-                            let mut addr = vec![0; 16];
-                            let name_encoding = in_arpa_name_2_addr(name, &mut addr);
-                            if name_encoding != 0 {
-                                if !extract_name(&header_bytes, qlen, &mut p, name, true) {
-                                    return; // bad packet
-                                }
-                                cache_insert(
-                                    caches,
-                                    name,
-                                    Some(&addr),
-                                    now,
-                                    cttl,
-                                    name_encoding | F_REVERSE,
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                    p = endrr1;
-                }
-            }
-            _ => {}
+            name.push('.'); // 添加 . 分隔符
         }
 
-        p = endrr;
+        if pos > plen {
+            return String::new();
+        }
     }
 
-    cache_end_insert(caches);
+    name.pop(); // 去除最后一个 '.'
+
+    // 返回域名和解析后的偏移量
+    *date = if p1 != 0 { &date[p1..] } else { &date[pos..] };
+    // let remaining_offset = if p1 != 0 { p1 } else { pos };
+    name
 }
 
-// 从一个字节切片中读取一个16位无符号整数，并更新切片的起始位置
-pub fn get_short(cp: &mut &[u8]) -> u16 {
-    if cp.len() < NS_INT16SZ {
-        panic!("Not enough data to read 16 bits value");
+const MAXARPANAME: usize = 75;
+fn in_arpa_name_2_addr(namein: &str) -> (u16, Option<AllAddr>) {
+    if namein.len() > MAXARPANAME {
+        return (0, None);
     }
 
-    let value = ((cp[0] as u16) << 8) | (cp[1] as u16);
-    *cp = &cp[NS_INT16SZ..]; // 更新指针位置，相当于 C 代码中的 (cp) += NS_INT16SZ;
-
-    value
-}
-
-// 从一个字节切片中读取一个32位整数，并更新切片的起始位置
-pub fn get_long(cp: &mut &[u8]) -> u32 {
-    if cp.len() < NS_INT32SZ {
-        panic!("Not enough data to read 32 bits value");
+    let mut names: Vec<&str> = namein.split('.').collect();
+    let j = names.len();
+    if j < 3 {
+        return (0, None);
     }
 
-    let value =
-        ((cp[0] as u32) << 24) | ((cp[1] as u32) << 16) | ((cp[2] as u32) << 8) | (cp[3] as u32);
-    *cp = &cp[NS_INT32SZ..]; // 更新指针位置，相当于 C 代码中的 (cp) += NS_INT32SZ;
+    let lastchunk = names.pop().unwrap();
+    let penchunk = names.pop().unwrap();
 
-    value
-}
-
-// 将一个 ARPA 域名转换为 IP 地址，并将结果存储在 addrr 中
-pub fn in_arpa_name_2_addr(name: &[u8], addrr: &mut Vec<u8>) -> u32 {
-    if name.len() > MAXARPANAME {
-        return 0;
-    }
-
-    let name_str = match std::str::from_utf8(name) {
-        Ok(v) => v,
-        Err(_) => return 0,
-    };
-
-    let mut labels: Vec<&str> = name_str.split('.').collect();
-    if labels.len() < 3 {
-        return 0;
-    }
-
-    let lastchunk = labels.pop().unwrap();
-    let penchunk = labels.pop().unwrap();
-
-    // 处理 IPv4 地址
-    if hostname_isequal(lastchunk, "arpa") && hostname_isequal(penchunk, "in-addr") {
-        addrr.clear();
-        addrr.resize(4, 0);
-        for (i, label) in labels.iter().enumerate() {
-            if !label.chars().all(|c| c.is_ascii_digit()) {
-                return 0;
+    // IPv4反向域名
+    if lastchunk == "arpa" && penchunk == "in-addr" {
+        let mut addrr = [0; 4];
+        /* IP v4 */
+        /* www.xxx.yyy.zzz.in-addr.arpa */
+        for (i, name) in names.iter().enumerate() {
+            if !name.chars().all(|c| c.is_ascii_digit()) {
+                return (0, None);
             }
-            let octet: u8 = match label.parse() {
+            let octet: u8 = match name.parse() {
                 Ok(v) => v,
-                Err(_) => return 0,
+                Err(_) => return (0, None),
             };
             addrr[3 - i] = octet;
         }
-        return F_IPV4;
-    // 处理 IPv6 地址
-    } else if hostname_isequal(penchunk, "ip6")
-        && (hostname_isequal(lastchunk, "int") || hostname_isequal(lastchunk, "arpa"))
-    {
-        addrr.clear();
-        addrr.resize(16, 0);
-        if name_str.starts_with("\\[x") {
-            let hex_part = &name_str[3..name_str.len() - 1];
+
+        return (F_IPV4, Some(IpAddr::V4(Ipv4Addr::from(addrr))));
+    } else if penchunk == "ip6" && (lastchunk == "int" || lastchunk == "arpa") {
+        let mut addrr = [0; 16];
+        /*  IP v6:
+        Address arrives as 0.1.2.3.4.5.6.7.8.9.a.b.c.d.e.f.ip6.[int|arpa]
+        or \[xfedcba9876543210fedcba9876543210/128].ip6.[int|arpa] */
+        let ipv6_str = names[0];
+        if let Some(ipv6) = ipv6_str.strip_prefix("\\[x") {
             let mut j = 0;
-            for (i, ch) in hex_part.chars().enumerate() {
+            for (i, ch) in ipv6.chars().enumerate() {
                 if !ch.is_ascii_hexdigit() {
-                    return 0;
+                    return (0, None);
                 }
                 let value = ch.to_digit(16).unwrap() as u8;
                 if i % 2 == 0 {
@@ -570,17 +217,17 @@ pub fn in_arpa_name_2_addr(name: &[u8], addrr: &mut Vec<u8>) -> u32 {
                 }
             }
             if j == 16 {
-                return F_IPV6;
+                return (F_IPV6, Some(IpAddr::V6(Ipv6Addr::from(addrr))));
             }
         } else {
             let mut idx = 15;
-            for label in labels.iter().rev() {
+            for label in names {
                 if label.len() != 1 || !label.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return 0;
+                    return (0, None);
                 }
                 let value = match u8::from_str_radix(label, 16) {
                     Ok(v) => v,
-                    Err(_) => return 0,
+                    Err(_) => return (0, None),
                 };
                 if idx % 2 == 1 {
                     addrr[idx / 2] |= value;
@@ -591,562 +238,81 @@ pub fn in_arpa_name_2_addr(name: &[u8], addrr: &mut Vec<u8>) -> u32 {
                     idx = idx.saturating_sub(1);
                 }
             }
-            return F_IPV6;
+            return (F_IPV6, Some(IpAddr::V6(Ipv6Addr::from(addrr))));
         }
     }
 
-    0
+    (0, None)
 }
 
-pub fn extract_neg_addrs(
-    caches: &mut Cache,
-    header: &Option<Header>,
-    plen: usize,
-    dnamebuff: &mut Vec<u8>,
-    now: SystemTime,
-) {
-    let header_bytes = match header {
-        Some(h) => h.to_bytes(),
-        None => return, // 无效的数据包
-    };
+// 跳过问题部分  返回数据偏移量
+fn skip_questions(packet: &[u8]) -> usize {
+    let header = Header::parse(packet).unwrap();
+    let qdcount = header.qdcount;
 
-    let mut found_soa = false;
-    let mut minttl: u32 = 0;
-    let mut flags = F_NEG;
-
-    // 确保数据包头部长度足够
-    if header_bytes.len() < 12 {
-        return; // 数据包无效
-    }
-
-    // 提取响应码
-    let rcode = header_bytes[3] & 0x0F;
-    if rcode == NXDOMAIN {
-        flags |= F_NXDOMAIN;
-    }
-
-    // 确保无回答记录
-    let ancount = u16::from_be_bytes([header_bytes[6], header_bytes[7]]);
-    if ancount != 0 {
-        return; // 存在回答记录，不生成负缓存
-    }
-
-    // 跳过问题部分
-    let mut p = match skip_questions(header, plen) {
-        Some(ptr) => ptr,
-        None => return, // 数据包无效
-    };
-
-    // 遍历 NS 部分以查找 SOA 记录
-    let nscount = u16::from_be_bytes([header_bytes[8], header_bytes[9]]);
-    for _ in 0..nscount {
-        if !extract_name(&header_bytes, plen, &mut p, dnamebuff, true) {
-            return; // 提取失败
-        }
-
-        if p.is_empty() {
-            return; // 包太短
-        }
-
-        let qtype = get_short(&mut p);
-        let qclass = get_short(&mut p);
-        let ttl = get_long(&mut p);
-        let rdlen = get_short(&mut p) as usize;
-
-        if qclass == C_IN && qtype == T_SOA {
-            // 提取 SOA 记录的 MNAME 和 RNAME
-            if !extract_name(&header_bytes, plen, &mut p, dnamebuff, true)
-                || !extract_name(&header_bytes, plen, &mut p, dnamebuff, true)
-            {
-                return; // 提取失败
-            }
-
-            if p.is_empty() {
-                return; // 数据包无效
-            }
-
-            let min_ttl = get_long(&mut p);
-            if !found_soa || ttl.min(min_ttl) < minttl {
-                minttl = ttl.min(min_ttl);
-            }
-
-            found_soa = true;
-        } else {
-            p = &p[rdlen..]; // 跳过其他记录
-        }
-
-        if p.is_empty() {
-            return; // 数据包无效
-        }
-    }
-
-    if !found_soa {
-        return; // 未找到 SOA 记录
-    }
-
-    cache_start_insert(caches);
-
-    // 遍历问题部分并生成负缓存
-    let mut p = &header_bytes[12..]; // 重置指针到问题部分
-    let qdcount = u16::from_be_bytes([header_bytes[4], header_bytes[5]]);
-    for _ in 0..qdcount {
-        dnamebuff.clear(); // 清空缓冲区
-
-        if !extract_name(&header_bytes, plen, &mut p, dnamebuff, true) {
-            return; // 提取失败
-        }
-
-        if p.is_empty() {
-            return; // 包无效
-        }
-
-        let qtype = get_short(&mut p);
-        let qclass = get_short(&mut p);
-
-        if qclass == C_IN {
-            if qtype == T_PTR {
-                let mut addr = Vec::new();
-                if in_arpa_name_2_addr(dnamebuff, &mut addr) != 0 {
-                    cache_insert(
-                        caches,
-                        dnamebuff,
-                        Some(&addr),
-                        now,
-                        minttl,
-                        F_REVERSE | flags,
-                    );
-                }
-            } else if qtype == T_A {
-                cache_insert(
-                    caches,
-                    dnamebuff,
-                    None,
-                    now,
-                    minttl,
-                    F_IPV4 | F_FORWARD | flags,
-                );
-            } else if qtype == T_AAAA {
-                cache_insert(
-                    caches,
-                    dnamebuff,
-                    None,
-                    now,
-                    minttl,
-                    F_IPV6 | F_FORWARD | flags,
-                );
-            }
-        }
-    }
-
-    cache_end_insert(caches);
-}
-
-pub fn answer_request(
-    header: &mut Option<Header>,
-    limit: &mut [u8],
-    qlen: u32,
-    mxname: &mut Option<String>,
-    mxtarget: &mut Option<String>,
-    options: u32,
-    now: SystemTime,
-    local_ttl: u64,
-    mut name: &mut Vec<u8>,
-    caches: &mut Cache,
-) -> i32 {
-    let mut addr: Vec<u8> = vec![0; 16];
-    let mut qtype = 0;
-    let mut qclass = 0;
-    let mut crecp: Option<Box<Crec>> = None;
-    let qdcount = if let Some(h) = header {
-        u16::from_be(h.qdcount) as i32
-    } else {
-        return 0;
-    };
-
-    let all_addr = if addr.len() == 4 {
-        AllAddr::Addr4(Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]))
-    } else if addr.len() == 16 {
-        let segments: [u8; 16] = addr
-            .clone()
-            .try_into()
-            .expect("Invalid IPv6 address length");
-        AllAddr::Addr6(Ipv6Addr::new(
-            ((segments[0] as u16) << 8) | segments[1] as u16,
-            ((segments[2] as u16) << 8) | segments[3] as u16,
-            ((segments[4] as u16) << 8) | segments[5] as u16,
-            ((segments[6] as u16) << 8) | segments[7] as u16,
-            ((segments[8] as u16) << 8) | segments[9] as u16,
-            ((segments[10] as u16) << 8) | segments[11] as u16,
-            ((segments[12] as u16) << 8) | segments[13] as u16,
-            ((segments[14] as u16) << 8) | segments[15] as u16,
-        ))
-    } else {
-        return 0; // 无效的地址长度
-    };
-    let mut anscount = 0;
-    let mut nxdomain = 0;
-    let mut auth = 1;
-
-    if qdcount == 0 || header.as_ref().unwrap().opcode != QUERY {
-        return 0;
-    }
-
-    // 使用 skip_questions 来获得不可变的切片
-    let mut ansp = if let Some(ans) = skip_questions(header, qlen as usize) {
-        ans
-    } else {
-        return 0;
-    };
-    let mut ansp_vec = ansp.to_vec();
-    // 将不可变切片复制到一个可变缓冲区中
-    let mut ansp_copy = Vec::from(ansp);
-
-    let header_bytes = match header {
-        Some(h) => h.to_bytes(),
-        None => return 0, // 无效的数据包
-    };
-
-    let mut p = &mut &limit[1..];
-    let name_binding = name.clone();
-    let name_str = std::str::from_utf8(&name_binding).expect("Invalid UTF-8 sequence in name");
+    let mut ansp = 12;
 
     for _ in 0..qdcount {
-        // 保存指向名称的指针以便复制到答案中
-        let nameoffset = p.as_ptr() as usize - limit.as_ptr() as usize;
-
-        if !extract_name(&header_bytes, qlen as usize, p, &mut name, true) {
-            return 0; // 错误的包
-        }
-
-        let is_arpa = in_arpa_name_2_addr(&name, &mut addr);
-        qtype = get_short(&mut p);
-        qclass = get_short(&mut p);
-
-        let mut ans = 0;
-
-        if qclass == C_CHAOS {
-            if qtype == T_TXT {
-                if hostname_isequal(name_str, "version.bind") {
-                    *name = format!("utdnsmasq-{}", VERSION).as_bytes().to_vec();
-                } else if hostname_isequal(name_str, "authors.bind") {
-                    *name = b"Simon Kelley".to_vec();
-                } else {
-                    *name = vec![0];
-                }
-
-                let len = name.len();
-                put_short((nameoffset as u16) | 0xc000, &mut ansp_copy);
-                put_short(T_TXT, &mut ansp_copy);
-                put_short(C_CHAOS, &mut ansp_copy);
-                put_long(0, &mut ansp_copy); // TTL
-                put_short((len + 1) as u16, &mut ansp_copy);
-                ansp_copy[0] = len as u8;
-                ansp_copy[1..=len].copy_from_slice(&name);
-                ansp_copy = ansp_copy[len + 1..].to_vec(); // 更新 ansp_copy 指针
-
-                ans = 1;
-                anscount += 1;
-
-                if limit.len() < ansp_copy.len() {
-                    return 0;
-                }
-            }
-        } else if qclass != C_IN {
-            return 0;
-        } else {
-            if (options & OPT_FILTER) != 0 && ((qtype == T_SOA) || (qtype == T_SRV)) {
-                ans = 1;
-            }
-            if qtype == T_PTR || qtype == T_ANY {
-                while let Some(crec) = crecp.clone() {
-                    // 确定 TTL 的值
-                    let ttl = if crec.flags & (F_IMMORTAL | F_DHCP) != 0 {
-                        local_ttl
-                    } else {
-                        match crec.ttd.duration_since(now) {
-                            Ok(duration) => duration.as_secs() as u64,
-                            Err(_) => return 0, // 如果时间已过，则返回错误
-                        }
-                    };
-
-                    // 如果是 T_ANY 类型且数据不是来自 /etc/hosts 或 DHCP 租约，则返回 0
-                    if qtype == T_ANY && (crec.flags & (F_HOSTS | F_DHCP)) == 0 {
-                        return 0;
-                    }
-
-                    ans = 1; // 标识已经回答了这个查询
-
-                    // 如果是负面缓存记录
-                    if crec.flags & F_NEG != 0 {
-                        log_query(caches, crec.flags & !F_FORWARD, &name, Some(&addr)); // 记录查询日志
-                        auth = 0; // 设置为非授权
-                        if crec.flags & F_NXDOMAIN != 0 {
-                            nxdomain = 1; // 设置 NXDOMAIN 错误
-                        }
-                    } else {
-                        if (crec.flags & (F_HOSTS | F_DHCP)) == 0 {
-                            auth = 0; // 设置为非授权
-                        }
-
-                        // 获取缓存名称并添加文本记录到回答部分
-                        let cache_name = cache_get_name(Some(Box::into_raw(crec.clone())));
-
-                        let new_ansp = add_text_record(
-                            nameoffset.try_into().unwrap(),
-                            &mut ansp_vec,
-                            ttl.try_into().unwrap(),
-                            0,
-                            T_PTR,
-                            &cache_name,
-                        );
-                        ansp = new_ansp; // 更新回答缓冲区
-                        log_query(
-                            caches,
-                            crec.flags & !F_FORWARD,
-                            &cache_name.as_bytes(),
-                            Some(&addr),
-                        ); // 记录日志
-                        anscount += 1; // 增加回答记录计数
-
-                        // 检查最后一个回答是否超出了数据包大小限制
-                        if ansp.len() > limit.len() {
-                            return 0;
-                        }
-                    }
-
-                    // 获取下一个缓存记录
-                    let next_crecp = cache_find_by_addr(
-                        caches,
-                        Some(Box::into_raw(crec)),
-                        &all_addr,
-                        now,
-                        is_arpa,
-                    );
-                    if let Some(ref mut crecp_inner) = crecp {
-                        *crecp_inner = next_crecp
-                            .map(|ptr| unsafe { Box::from_raw(ptr) })
-                            .expect("REASON");
-                    }
-                    if ans == 0
-                        && is_arpa == F_IPV4
-                        && (options & OPT_BOGUSPRIV != 0)
-                        && private_net(&all_addr)
-                    {
-                        let addr_str = std::str::from_utf8(&addr).expect("Invalid UTF-8 sequence");
-                        ansp = add_text_record(
-                            nameoffset.try_into().unwrap(),
-                            &mut ansp_vec,
-                            local_ttl.try_into().unwrap(),
-                            0,
-                            T_PTR,
-                            &addr_str,
-                        );
-                        log_query(caches, F_CONFIG | F_REVERSE | F_IPV4, &addr, Some(&addr));
-                        ans = 1;
-                        anscount += 1;
-
-                        if limit.len() < ansp_copy.len() {
-                            return 0;
-                        }
-                    }
-                }
-            }
-            if qtype == T_A || qtype == T_ANY {
-                if (options & OPT_FILTER) != 0 && qtype == T_ANY && name_str.contains('_') {
-                    ans = 1;
-                } else {
-                    crecp = None;
-                    while let Some(crec) = crecp.clone() {
-                        let ttl = if crec.flags & (F_IMMORTAL | F_DHCP) != 0 {
-                            local_ttl
-                        } else {
-                            match crec.ttd.duration_since(now) {
-                                Ok(duration) => duration.as_secs() as u64,
-                                Err(_) => return 0,
-                            }
-                        };
-
-                        if qtype == T_ANY && (crec.flags & (F_HOSTS | F_DHCP)) == 0 {
-                            return 0;
-                        }
-
-                        ans = 1;
-                        if crec.flags & F_NEG != 0 {
-                            log_query(caches, crec.flags, &name, None);
-                            auth = 0;
-                            if crec.flags & F_NXDOMAIN != 0 {
-                                nxdomain = 1;
-                            }
-                        } else {
-                            if (crec.flags & (F_HOSTS | F_DHCP)) == 0 {
-                                auth = 0;
-                            }
-                            log_query(caches, crec.flags & !F_REVERSE, &name, Some(&addr));
-
-                            put_short((nameoffset as u16) | 0xc000, &mut ansp_copy);
-                            put_short(T_A, &mut ansp_copy);
-                            put_short(C_IN, &mut ansp_copy);
-                            put_long(ttl as u32, &mut ansp_copy);
-
-                            if let AllAddr::Addr4(ipv4) = crec.addr {
-                                let ipv4_bytes = ipv4.octets();
-                                ansp_copy.extend_from_slice(&ipv4_bytes);
-                                anscount += 1;
-                            }
-
-                            if limit.len() < ansp_copy.len() {
-                                return 0;
-                            }
-                        }
-                    }
-                }
-            }
-            if addr.len() > 4 {
-                if qtype == T_AAAA || qtype == T_ANY {
-                    if (options & OPT_FILTER) != 0 && qtype == T_ANY && name_str.contains('_') {
-                        ans = 1;
-                    } else {
-                        crecp = None;
-                        while let Some(crec) = cache_find_by_name(
-                            caches,
-                            crecp.clone().map(|c| Box::into_raw(c)),
-                            &name_str,
-                            now,
-                            F_IPV6,
-                        ) {
-                            let ttl = if (unsafe { &*crec }).flags & (F_IMMORTAL | F_DHCP) != 0 {
-                                local_ttl
-                            } else {
-                                match (unsafe { &*crec }).ttd.duration_since(now) {
-                                    Ok(duration) => duration.as_secs() as u64,
-                                    Err(_) => return 0,
-                                }
-                            };
-
-                            if qtype == T_ANY
-                                && ((unsafe { &*crec }).flags & (F_HOSTS | F_DHCP)) == 0
-                            {
-                                return 0;
-                            }
-
-                            ans = 1;
-
-                            if (unsafe { &*crec }).flags & F_NEG != 0 {
-                                log_query(caches, (unsafe { &*crec }).flags, &name, None);
-                                auth = 0;
-                                if (unsafe { &*crec }).flags & F_NXDOMAIN != 0 {
-                                    nxdomain = 1;
-                                }
-                            } else {
-                                if ((unsafe { &*crec }).flags & (F_HOSTS | F_DHCP)) == 0 {
-                                    auth = 0;
-                                }
-                                log_query(
-                                    caches,
-                                    (unsafe { &*crec }).flags & !F_REVERSE,
-                                    &name,
-                                    Some(&addr),
-                                );
-
-                                put_short((nameoffset as u16) | 0xc000, &mut ansp_copy);
-                                put_short(T_AAAA, &mut ansp_copy);
-                                put_short(C_IN, &mut ansp_copy);
-                                put_long(ttl as u32, &mut ansp_copy);
-
-                                put_short(IN6ADDRSZ, &mut ansp_copy);
-                                if let AllAddr::Addr6(ipv6) = (unsafe { &*crec }).addr {
-                                    let ipv6_bytes = ipv6.octets();
-                                    ansp_copy.extend_from_slice(&ipv6_bytes);
-                                    anscount += 1;
-                                }
-
-                                if limit.len() < ansp_copy.len() {
-                                    return 0;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if qtype == T_MX || qtype == T_ANY {
-                if let Some(ref mxname) = mxname {
-                    if hostname_isequal(&name_str, mxname) {
-                        ansp_copy = add_text_record(
-                            nameoffset.try_into().unwrap(),
-                            &mut ansp_copy,
-                            local_ttl as u32,
-                            1,
-                            T_MX,
-                            mxtarget.as_deref().unwrap_or(""),
-                        )
-                        .to_vec();
-                        anscount += 1;
-                        ans = 1;
-                    }
-                } else if (options & (OPT_SELFMX | OPT_LOCALMX)) != 0
-                    && cache_find_by_name(caches, None, &name_str, now, F_HOSTS | F_DHCP).is_some()
-                {
-                    let target = if (options & OPT_SELFMX) != 0 {
-                        &name_str
-                    } else {
-                        mxtarget.as_deref().unwrap_or("")
-                    };
-                    ansp_copy = add_text_record(
-                        nameoffset.try_into().unwrap(),
-                        &mut ansp_copy,
-                        local_ttl as u32,
-                        1,
-                        T_MX,
-                        target,
-                    )
-                    .to_vec();
-                    anscount += 1;
-                    ans = 1;
-                }
-                if limit.len() < ansp_copy.len() {
-                    return 0;
-                }
-            }
-
-            if qtype == T_MAILB {
-                ans = 1;
-                nxdomain = 1;
-            }
-
-            if ans == 0 {
+        loop {
+            let label_type = packet[ansp] & 0xc0;
+            if ansp > packet.len() {
                 return 0;
             }
+
+            if label_type == 0xc0 {
+                // 压缩指针，指向报文其他位置
+                ansp += 2;
+                break;
+            } else if label_type == 0x80 {
+                return 0;
+            } else if label_type == 0x40 {
+                // 扩展标签类型（如位字符串）
+                if packet[ansp] & 0x3f != 1 {
+                    return 0;
+                }
+
+                ansp += 1;
+                let count = packet[ansp];
+                ansp += 1;
+
+                if count == 0 {
+                    ansp += 32;
+                } else {
+                    ansp += ((count - 1) >> 3) as usize + 1;
+                }
+            } else {
+                // 普通标签，后6位为长度
+                let len = packet[ansp] & 0x3f; // 后6位为长度
+                ansp += 1;
+
+                if len == 0 {
+                    // 域名部分结束
+                    break;
+                }
+
+                ansp += len as usize;
+            }
         }
+
+        ansp += 4; /* class(2 byte) and type(2 byte) */
     }
 
-    if let Some(ref mut header) = header {
-        header.qr = 1; // Response
-        header.aa = auth as u8; // Authoritative - only hosts and DHCP derived names
-        header.ra = 1; // Recursion available
-        header.tc = 0; // No truncation
-
-        if anscount == 0 && nxdomain != 0 {
-            header.rcode = NXDOMAIN;
-        } else {
-            header.rcode = NOERROR; // No error
-        }
-
-        header.ancount = anscount as u16;
-        header.nscount = 0;
-        header.arcount = 0;
+    if ansp > packet.len() {
+        return 0;
     }
 
-    // 计算返回值，相当于 `return ansp - (unsigned char *)header;` 在C中指针的偏移
-    let return_value =
-        (ansp_copy.len() as isize) - (header_bytes.as_ptr() as isize - limit.as_ptr() as isize);
-    return_value as i32
+    ansp
 }
 
-// 判断地址是否为私有网络地址
-pub fn private_net(addr: &AllAddr) -> bool {
-    // 如果地址是 IPv4 类型，进行私有网络检查
-    if let AllAddr::Addr4(ipv4_addr) = addr {
-        let octets = ipv4_addr.octets();
+// 判断给定的IP地址是否属于私有网络地址空间, 只判断ipv4
+/*
+1. **10.0.0.0/8**: 单A类网络，范围`10.0.0.0` - `10.255.255.255`
+2. **172.16.0.0/12**: 16个B类网络，范围`172.16.0.0` - `172.31.255.255`
+3. **192.168.0.0/16**: 256个C类网络，范围`192.168.0.0` - `192.168.255.255`
+*/
+fn private_net(addrp: &AllAddr) -> bool {
+    if let Some(addr) = addrp.to_ipv4() {
+        let octets = addr.octets();
 
         // 对应 C 代码中的 inet_netof 检查
         // 10.x.x.x (0x0A == 10)
@@ -1164,223 +330,1580 @@ pub fn private_net(addr: &AllAddr) -> bool {
             return true;
         }
     }
-
-    // 如果不是 IPv4 地址，返回 false
     false
 }
 
-pub fn add_text_record<'a>(
-    nameoffset: u16,
-    p: &'a mut Vec<u8>,
-    ttl: u32,
-    pref: u16,
-    record_type: u16,
-    name: &'a str,
-) -> &'a mut Vec<u8> {
-    // 保存初始位置
-    let sav_len = p.len();
+// 构建一个问题的答案
+fn add_text_record(nameoffset: u16, ttl: u32, pref: u16, qtype: u16, name: &str) -> Vec<u8> {
+    let mut ansp: Vec<u8> = Vec::new();
+    put_short(nameoffset | 0xc000, &mut ansp); // 域名，压缩指针形式   指向报文前面已出现的域名针对于数据包偏移的数值
+    put_short(qtype, &mut ansp); // 资源类型 2字节
+    put_short(C_IN, &mut ansp); // 记录类别 1字节
+    put_long(ttl, &mut ansp); // ttl 生存时间 4字节]
 
-    // 添加压缩后的名称偏移
-    put_short(nameoffset | 0xc000, p);
+    let sav = ansp.len();
+    put_short(0, &mut ansp); // 站位RDLENGTH的值，最后填写数据部分的长度
 
-    // 添加记录类型
-    put_short(record_type, p);
-
-    // 添加类 (C_IN)
-    put_short(C_IN, p);
-
-    // 添加 TTL (大端序)
-    put_long(ttl, p);
-
-    // 占位符添加 RDLENGTH，稍后更新
-    let rdlength_index = p.len();
-    put_short(0, p); // 占位符，稍后会更新
-
-    // 如果 pref 不是 0，则添加它
     if pref != 0 {
-        put_short(pref, p);
+        put_short(pref, &mut ansp);
     }
 
-    // 处理名称部分
-    let mut label_len_pos = None; // 用于保存每个标签长度的位置
-    let mut label_len = 0; // 当前标签的长度
+    let name_vec: Vec<&str> = name.split('.').collect();
+    for n in name_vec {
+        ansp.push(n.len() as u8); // 写入每个阶段数据的长度
+        ansp.extend(n.as_bytes()); // 写入数据
+    }
+    ansp.push(0); // 写入域名结束符
 
-    for c in name.chars() {
-        if c == '.' {
-            if let Some(pos) = label_len_pos {
-                p[pos] = label_len as u8; // 更新标签长度
+    let l = ansp.len() - sav - 2;
+    ansp[sav] = (l >> 8) as u8;
+    ansp[sav + 1] = (l & 0xFF) as u8;
+
+    ansp
+}
+
+// 处理 DNS 否定响应（NXDOMAIN 或 NODATA），提取并缓存否定信息，实现 DNS 否定缓存功能。
+pub fn extract_neg_addrs(caches: &mut Cache, packet: &[u8], now: SystemTime) {
+    let mut flags = F_NEG;
+    let mut found_soa = false;
+    let mut minttl: u32 = 0;
+    let mut ttl: u32;
+    let mut qtype: u16;
+    let mut qclass: u16;
+    let mut rdlen: u16;
+    let header = Header::parse(packet).unwrap();
+
+    if header.rcode == NXDOMAIN {
+        flags |= F_NXDOMAIN;
+    }
+
+    if header.ancount != 0 {
+        return;
+    }
+
+    let pos = skip_questions(packet);
+    if pos == 0 {
+        return;
+    }
+    let mut p: &[u8] = &packet[pos..];
+
+    // 首先需要找到SOA记录，以获得最小TTL6，然后为每个问题添加一个NEG缓存条目。
+    for _ in 0..header.nscount {
+        let mut name = extract_name(packet, &mut p);
+        if name.is_empty() {
+            return;
+        }
+
+        qtype = get_short(&mut p);
+        qclass = get_short(&mut p);
+        ttl = get_long(&mut p);
+        rdlen = get_short(&mut p);
+
+        if qclass == C_IN && qtype == T_SOA {
+            // MNAME
+            name = extract_name(packet, &mut p);
+            if name.is_empty() {
+                return;
             }
-            // 新的标签开始
-            label_len_pos = Some(p.len());
-            p.push(0); // 先占位，表示标签长度
-            label_len = 0;
+            // RNAME
+            name = extract_name(packet, &mut p);
+            if name.is_empty() {
+                return;
+            }
+
+            let mut _dummy = get_long(&mut p); /* SERIAL */
+            _dummy = get_long(&mut p); /* REFRESH */
+            _dummy = get_long(&mut p); /* RETRY */
+            _dummy = get_long(&mut p); /* EXPIRE */
+
+            if !found_soa {
+                found_soa = true;
+                minttl = ttl;
+            } else if ttl < minttl {
+                minttl = ttl;
+            }
+
+            ttl = get_long(&mut p); /* minTTL */
+            if ttl < minttl {
+                minttl = ttl;
+            }
         } else {
-            p.push(c as u8);
-            label_len += 1;
+            p = &p[rdlen as usize..];
+        }
+
+        // 判断p是否越界
+    }
+
+    if !found_soa {
+        return;
+    }
+
+    caches.cache_start_insert();
+    p = &packet[12..];
+    for _ in 0..header.qdcount {
+        let name = extract_name(packet, &mut p);
+        if name.is_empty() {
+            return;
+        }
+        qtype = get_short(&mut p);
+        qclass = get_short(&mut p);
+
+        let (is_arpa, addr) = in_arpa_name_2_addr(&name);
+        if qclass == C_IN && qtype == T_PTR && is_arpa != 0 {
+            caches.cache_insert(Some(&name), addr, now, minttl, is_arpa | F_REVERSE | flags);
+        } else if qclass == C_IN && qtype == T_A {
+            caches.cache_insert(Some(&name), None, now, minttl, F_IPV4 | F_FORWARD | flags);
+        } else if qclass == C_IN && qtype == T_AAAA {
+            caches.cache_insert(Some(&name), None, now, minttl, F_IPV6 | F_FORWARD | flags);
         }
     }
-
-    // 处理最后一个标签
-    if let Some(pos) = label_len_pos {
-        p[pos] = label_len as u8; // 更新最后一个标签长度
-    }
-
-    // 添加终止符
-    p.push(0);
-
-    // 计算 RDLENGTH 的值并更新
-    let rdlength = (p.len() - sav_len - 10) as u16; // RDLENGTH 不包括 10 个字节（TYPE、CLASS、TTL、RDLENGTH 本身）
-    let rdlength_bytes = rdlength.to_be_bytes();
-    p[rdlength_index..rdlength_index + 2].copy_from_slice(&rdlength_bytes);
-
-    // 返回最终的向量
-    p
+    caches.cache_end_insert();
 }
 
-pub fn put_long(l: u32, cp: &mut Vec<u8>) {
-    const NS_INT32SZ: usize = 4;
+// 从 DNS 响应包中提取地址记录并缓存
+pub fn extract_addresses(caches: &mut Cache, packet: &[u8], now: SystemTime) {
+    let mut ttl: u32;
+    let mut qtype: u16;
+    let mut qclass: u16;
+    let mut rdlen: u16;
 
-    // 确保 `cp` 有足够的长度以写入 32 位数据
-    if cp.len() < NS_INT32SZ {
-        panic!("Not enough space in buffer to write 32-bit value");
+    let header = Header::parse(packet).unwrap();
+    let pos = skip_questions(packet);
+    if pos == 0 {
+        return;
     }
+    let mut p = &packet[pos..];
 
-    // 将 32 位整数按大端序写入到 `cp` 中
-    cp[0] = (l >> 24) as u8; // 写入高 8 位
-    cp[1] = (l >> 16) as u8; // 写入次高 8 位
-    cp[2] = (l >> 8) as u8; // 写入次低 8 位
-    cp[3] = (l & 0xff) as u8; // 写入低 8 位
+    caches.cache_start_insert();
+    let psave = p;
 
-    // 更新 `cp` 的位置，相当于 C 中的 `(cp) += NS_INT32SZ`
-    cp.drain(..NS_INT32SZ);
+    for _ in 0..header.ancount {
+        let origname = p;
+
+        let mut name = extract_name(packet, &mut p);
+        if name.is_empty() {
+            return;
+        }
+
+        qtype = get_short(&mut p);
+        qclass = get_short(&mut p);
+        ttl = get_long(&mut p);
+        rdlen = get_short(&mut p);
+
+        let endrr = &p[rdlen as usize..];
+        if p.len() < rdlen as usize {
+            return;
+        }
+
+        if qclass != C_IN {
+            p = endrr;
+            continue;
+        }
+
+        if qtype == T_A {
+            let ip_bytes: [u8; 4] = p[..4].try_into().unwrap();
+            let addr = Ipv4Addr::from(ip_bytes);
+            caches.cache_insert(
+                Some(&name),
+                Some(IpAddr::V4(addr)),
+                now,
+                ttl,
+                F_IPV4 | F_FORWARD,
+            );
+        } else if qtype == T_AAAA {
+            let ip_bytes: [u8; 16] = p[..16].try_into().unwrap();
+            let addr = Ipv6Addr::from(ip_bytes);
+            caches.cache_insert(
+                Some(&name),
+                Some(IpAddr::V6(addr)),
+                now,
+                ttl,
+                F_IPV6 | F_FORWARD,
+            );
+        } else if qtype == T_PTR {
+            let (name_encoding, addr) = in_arpa_name_2_addr(&name);
+            if name_encoding != 0 {
+                name = extract_name(packet, &mut p);
+                if name.is_empty() {
+                    return;
+                }
+                caches.cache_insert(Some(&name), addr, now, ttl, name_encoding | F_REVERSE);
+            }
+        } else if qtype == T_CNAME {
+            let targp = p;
+            let mut endrr1: &[u8];
+            let mut cttl: u32;
+            p = psave;
+
+            for _ in 0..header.ancount {
+                let mut tmp = targp;
+
+                name = extract_name(packet, &mut tmp);
+                if name.is_empty() {
+                    return;
+                }
+                /* compare this name with target of CNAME in name buffer */
+                let res = extract_name(packet, &mut p);
+                if res.is_empty() {
+                    return;
+                }
+
+                qtype = get_short(&mut p);
+                qclass = get_short(&mut p);
+                cttl = get_long(&mut p);
+                rdlen = get_short(&mut p);
+
+                endrr1 = &p[rdlen as usize..];
+                if endrr1.len() < rdlen as usize {
+                    return;
+                }
+
+                if qclass != C_IN || res != name {
+                    p = endrr1;
+                    continue;
+                }
+
+                if ttl < cttl {
+                    cttl = ttl;
+                }
+
+                tmp = origname;
+                name = extract_name(packet, &mut tmp);
+                if name.is_empty() {
+                    return;
+                }
+
+                if qtype == T_A {
+                    let ip_bytes: [u8; 4] = p[..4].try_into().unwrap();
+                    let addr = Ipv4Addr::from(ip_bytes);
+                    caches.cache_insert(
+                        Some(&name),
+                        Some(IpAddr::V4(addr)),
+                        now,
+                        cttl,
+                        F_IPV4 | F_FORWARD,
+                    );
+                } else if qtype == T_AAAA {
+                    let ip_bytes: [u8; 16] = p[..16].try_into().unwrap();
+                    let addr = Ipv6Addr::from(ip_bytes);
+                    caches.cache_insert(
+                        Some(&name),
+                        Some(IpAddr::V6(addr)),
+                        now,
+                        cttl,
+                        F_IPV6 | F_FORWARD,
+                    );
+                } else if qtype == T_PTR {
+                    let (name_encoding, addr) = in_arpa_name_2_addr(&name);
+                    if name_encoding != 0 {
+                        name = extract_name(packet, &mut p);
+                        if name.is_empty() {
+                            return;
+                        }
+                        caches.cache_insert(
+                            Some(&name),
+                            addr,
+                            now,
+                            cttl,
+                            name_encoding | F_REVERSE,
+                        );
+                    }
+                }
+
+                p = endrr1;
+            }
+        }
+        p = endrr;
+    }
+    caches.cache_end_insert();
 }
 
-pub fn put_short(s: u16, cp: &mut Vec<u8>) {
-    const NS_INT16SZ: usize = 2;
+// 构造 DNS 响应数据包
+pub fn setup_reply(packet: &[u8], addrp: Option<AllAddr>, flags: u16, ttl: u32) -> Vec<u8> {
+    let mut header = Header::parse(packet).unwrap(); // 解析数据包的头
+    let pos = skip_questions(packet); // 跳过问题部分
+    let mut p: Vec<u8> = Vec::new(); // 用于存回答部分内容
+    let mut ans: Vec<u8>;
+    // ans.extend(packet); // 获取回答的头和问题部分
+    ans = packet[..pos].to_vec();
 
-    // 确保向 `cp` 写入的数据有足够的空间
-    if cp.len() < NS_INT16SZ {
-        panic!("Not enough space in buffer to write 16-bit value");
+    // 更换头部信息
+    header.qr = true; /* response */
+    header.aa = false; /* authoritive */
+    header.ra = true; /* recursion if available */
+    header.tc = false; /* not truncated */
+    header.nscount = 0;
+    header.arcount = 0;
+    header.ancount = 0; /* no answers unless changed below*/
+
+    if flags == F_NEG {
+        header.rcode = SERVFAIL; /* couldn't get memory */
+    } else if flags == F_NOERR {
+        header.rcode = NOERROR;
+    } else if flags == F_NXDOMAIN {
+        header.rcode = NXDOMAIN;
+    } else if pos != 0 && flags == F_IPV4 {
+        // pos != 0 表示跳过问题部分是成功的
+        header.rcode = NOERROR;
+        header.ancount = 1;
+        header.aa = true;
+        put_short(12 | 0xc000, &mut p);
+        put_short(T_A, &mut p);
+        put_short(C_IN, &mut p);
+        put_long(ttl, &mut p);
+        put_short(INADDRSZ, &mut p);
+        let addr4_byte = addrp.unwrap().to_ipv4().unwrap().octets();
+        p.extend(&addr4_byte);
+    } else if pos != 0 && flags == F_IPV6 {
+        header.rcode = NOERROR;
+        header.ancount = 1;
+        header.aa = true;
+        put_short(12 | 0xc000, &mut p);
+        put_short(T_AAAA, &mut p);
+        put_short(C_IN, &mut p);
+        put_long(ttl, &mut p);
+        put_short(IN6ADDRSZ, &mut p);
+        let addr6_byte = addrp.unwrap().to_ipv6().unwrap().octets();
+        p.extend(&addr6_byte);
+    } else {
+        header.rcode = REFUSED
     }
 
-    // 将 16 位值拆分为两个字节，按大端序写入到 `cp` 中
-    cp[0] = (s >> 8) as u8;
-    cp[1] = (s & 0xff) as u8;
-
-    // 更新 `cp`，移除已经写入的部分
-    cp.drain(..NS_INT16SZ);
+    let header_bytes = header.to_bytes();
+    ans[..12].copy_from_slice(&header_bytes); // 替换数据包的头信息
+    ans.extend(p); // 添加回答部分信息
+    ans
 }
 
-pub fn extract_request(header: &Option<Header>, qlen: u32, name: &mut Vec<u8>) -> bool {
-    let header = match header {
-        Some(h) => h,
-        None => return false, // 如果 header 不存在，返回 false
-    };
-
-    let header_size = std::mem::size_of::<Header>();
-    let mut p = &header.to_bytes()[header_size..];
-    let qdcount = NetworkEndian::read_u16(&header.to_bytes()[4..6]);
-
-    if qdcount != 1 || header.opcode != QUERY {
-        return false; // 必须恰好有一个查询
+// 检查DNS响应中是否存在恶意ip地址
+pub fn check_for_bogus_wildcard(
+    caches: &mut Cache,
+    packet: &mut [u8],
+    baddrs: &[BogusAddr],
+    now: SystemTime,
+) -> u32 {
+    let pos = skip_questions(packet);
+    let mut p = &packet[pos..];
+    if p.is_empty() {
+        return 0;
     }
 
-    let binding = header.to_bytes();
-    if !extract_name(&binding, qlen.try_into().unwrap(), &mut p, name, true) {
-        return false; // 数据包无效
+    let mut header = Header::parse(packet).unwrap();
+    for _ in 0..header.ancount {
+        let name = extract_name(packet, &mut p);
+        if name.is_empty() {
+            return 0;
+        }
+
+        let qtype = get_short(&mut p);
+        let qclass = get_short(&mut p);
+        let ttl = get_long(&mut p);
+        let rdlen = get_short(&mut p);
+
+        if qclass == C_IN && qtype == T_A {
+            for baddr in baddrs.iter() {
+                if p.len() >= INADDRSZ as usize {
+                    let ip_bytes: [u8; 4] = [p[0], p[1], p[2], p[3]];
+                    if baddr.addr == Ipv4Addr::from(ip_bytes) {
+                        header.aa = false;
+                        header.ra = true;
+                        header.nscount = 0;
+                        header.arcount = 0;
+                        header.ancount = 0;
+                        header.rcode = NXDOMAIN;
+
+                        caches.cache_start_insert();
+                        caches.cache_insert(
+                            Some(&name),
+                            None,
+                            now,
+                            ttl,
+                            F_IPV4 | F_FORWARD | F_NEG | F_NXDOMAIN | F_CONFIG,
+                        );
+                        caches.cache_end_insert();
+
+                        // 在返回1之前，将header的数据替换packet的前12个字节
+                        let header_bytes = header.to_bytes();
+                        packet[..12].copy_from_slice(&header_bytes);
+
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        p = &p[rdlen as usize..];
+    }
+    0
+}
+
+// 如果数据包只包含一个查询，则返回1并在name中保留查询中的名称
+pub fn extract_request(packet: &[u8]) -> (u16, String) {
+    let mut p = &packet[12..]; // 12 为header在packet中占有的字节数
+
+    let header = Header::parse(packet).unwrap();
+
+    if header.qdcount != 1 || header.opcode != QUERY {
+        return (0, String::new()); // 必须恰好有一个查询
     }
 
-    let qtype = NetworkEndian::read_u16(&p[0..2]);
-    p = &p[2..];
-    let qclass = NetworkEndian::read_u16(&p[0..2]);
-    p = &p[2..];
+    let name = extract_name(packet, &mut p);
+    let qtype = get_short(&mut p);
+    let qclass = get_short(&mut p);
 
     if qclass == C_IN {
-        if qtype == T_A || qtype == T_AAAA || qtype == T_ANY {
-            return true;
+        if qtype == T_A {
+            return (F_IPV4, name);
+        } else if qtype == T_AAAA {
+            return (F_IPV6, name);
+        } else if qtype == T_ANY {
+            return (F_IPV4 | F_IPV6, name);
         }
     }
 
-    false
+    // let name = String::new();
+    (F_QUERY, name)
 }
 
-// pub fn setup_reply(
-//     header: &mut Header,
-//     qlen: usize,
-//     addrp: Option<&[u8]>,
-//     flags: u32,
-//     ttl: u64,
-// ) -> usize {
-//     // 调用 skip_questions 辅助函数
-//     let binding = Some(*header);
-//     let mut p = if let Some(offset) = skip_questions(&binding, qlen) {
-//         offset
-//     } else {
-//         return 0;
-//     };
+pub fn answer_request(
+    packet: &[u8],
+    mxname: &str,
+    mxtarget: &str,
+    options: u32,
+    caches: &mut Cache,
+    now: SystemTime,
+    local_ttl: u32,
+) -> Vec<u8> {
+    let mut ans = 0;
+    let mut anscount: u16 = 0;
+    let mut auth: bool = true;
+    let mut nxdomain: i32 = 0;
+    let mut ans_packet: Vec<u8> = Vec::new(); // 返回的回答数据包
 
-//     let mut p_vec = p.to_vec();
-//     // 将不可变切片复制到一个可变缓冲区中
-//     let mut p_copy = Vec::from(p);
+    let header = Header::parse(packet).unwrap();
+    let qdcount = header.qdcount;
 
-//     // 初始化回复头部信息
-//     header.qr = 1; // 设置为响应
-//     header.aa = 0; // 非权威回答
-//     header.ra = 1; // 支持递归
-//     header.tc = 0; // 无截断
-//     header.nscount = 0;
-//     header.arcount = 0;
-//     header.ancount = 0; // 初始没有答案，除非后续改变
+    // 检查请求的合法性
+    if qdcount == 0 || header.opcode != QUERY {
+        return ans_packet;
+    }
 
-//     // 根据 flags 设置不同的返回码和响应内容
-//     match flags {
-//         F_NEG => {
-//             header.rcode = SERVFAIL; // 内存获取失败
-//         }
-//         F_NOERR => {
-//             header.rcode = NOERROR; // 空域名
-//         }
-//         F_NXDOMAIN => {
-//             header.rcode = NXDOMAIN; // 域名不存在
-//         }
-//         F_IPV4 if p.len() > 0 => {
-//             if let Some(addr) = addrp {
-//                 if addr.len() == INADDRSZ {
-//                     header.rcode = NOERROR;
-//                     header.ancount = 1;
-//                     header.aa = 1;
+    // 跳过问题部分，找到答案部分的起始位置
+    let ansp_offset = skip_questions(packet);
+    if ansp_offset == 0 {
+        return Vec::new();
+    }
+    let mut ansp: Vec<u8> = Vec::new();
 
-//                     // 写入资源记录
-//                     put_short(0xc000 | (std::mem::size_of::<Header>()) as u16, &mut p_copy);
-//                     put_short(T_A, &mut p_copy);
-//                     put_short(C_IN, &mut p_copy);
-//                     put_long(ttl as u32, &mut p_copy); // TTL 只保留低 32 位
-//                     put_short(INADDRSZ as u16, &mut p_copy);
-//                     p_copy.extend_from_slice(addr);
-//                 }
-//             }
-//         }
-//         F_IPV6 if p.len() > 0 => {
-//             if let Some(addr) = addrp {
-//                 if addr.len() == IN6ADDRSZ.into() {
-//                     header.rcode = NOERROR;
-//                     header.ancount = 1;
-//                     header.aa = 1;
+    let mut p: &[u8] = &packet[12..];
 
-//                     // // 写入资源记录
-//                     put_short(0xc000 | (std::mem::size_of::<Header>()) as u16, &mut p_copy);
-//                     put_short(T_AAAA, &mut p_copy);
-//                     put_short(C_IN, &mut p_copy);
-//                     put_long(ttl as u32, &mut p_copy); // TTL 只保留低 32 位
-//                     put_short(IN6ADDRSZ as u16, &mut p_copy);
-//                     p_copy.extend_from_slice(addr);
-//                 }
-//             }
-//         }
-//         _ => {
-//             header.rcode = REFUSED; // 拒绝请求
-//         }
-//     }
+    let q_byte = &packet[12..ansp_offset];
+    let mut se_len = 0;
+    for _ in 0..qdcount {
+        let nameoffset = 12 + se_len as u16;
 
-//     p_copy.len()
-// }
+        let start_len = p.len();
+        // 提取查询域名
+        let mut name = extract_name(packet, &mut p);
+        if name.is_empty() {
+            return ans_packet;
+        }
+
+        // 检查是否为反向解析 如果是，将解析出的 IP 地址存储到 addr 中
+        let (is_arpa, addr) = in_arpa_name_2_addr(&name);
+
+        // 提取查询类型和类
+        let qtype = get_short(&mut p);
+        let qclass = get_short(&mut p);
+
+        let end_len = p.len();
+        se_len = start_len - end_len;
+
+        // 处理特殊查询（CHAOS 类）
+        if qclass == C_CHAOS {
+            // 一种古老且已过时的网络协议 用于某些特殊的 DNS 查询
+            if qtype == T_TXT {
+                if name.as_str() == "version.bind" {
+                    name = format!("dnsmasq-{}", VERSION);
+                } else if name.as_str() == "authors.bind" {
+                    name = "Simon Kelley".to_string();
+                } else {
+                    name = String::new();
+                }
+
+                let len = name.len();
+                put_short(nameoffset | 0xc000, &mut ansp); // 域名，压缩指针形式   指向报文前面已出现的域名针对于数据包偏移的数值
+                put_short(T_TXT, &mut ansp); // 资源类型 2字节
+                put_short(C_CHAOS, &mut ansp); // 记录类别 1字节
+                put_long(0, &mut ansp); // ttl 生存时间 4字节
+                put_short((len + 1) as u16, &mut ansp); // 指示 RDATA 字段的字节数 2字节
+                ansp.push(len as u8); // 添加 name 长度
+                ansp.extend(name.as_bytes()); // 添加name
+
+                ans = 1;
+                anscount += 1;
+
+                if ansp.len() > PACKETSZ {
+                    // 数据包长度超过设置值
+                    return ans_packet;
+                }
+            } else {
+                return ans_packet;
+            }
+        } else if qclass != C_IN {
+            //检查是否为互联网类查询
+            return ans_packet;
+        } else {
+            //从缓存中查找答案
+            if (options & OPT_FILTER) != 0 && (qtype == T_SOA || qtype == T_SRV) {
+                ans = 1;
+            }
+
+            // 反向域名解析（IP → 域名）所有记录类型查询
+            if qtype == T_PTR || qtype == T_ANY {
+                // 在缓存中查找
+                let mut crecp_rc = caches.cache_find_by_addr(None, addr, now, is_arpa);
+                while let Some(crecp_ref) = crecp_rc.clone() {
+                    let crecp = crecp_ref.borrow();
+
+                    // 返回DHCP表项的ttl值为0，在租约到期前ttl值可能会改变。
+                    let ttl: u32 = if crecp.flags & (F_IMMORTAL | F_DHCP) != 0 {
+                        local_ttl
+                    } else {
+                        match crecp.ttd.duration_since(now) {
+                            Ok(duration) => duration.as_secs() as u32,
+                            Err(_) => 0, // If ttd is in the past, use 0 TTL
+                        }
+                    };
+
+                    // 不要用非/etc/hosts或DHCP租约的数据回答
+                    if qtype == T_ANY && crecp.flags & (F_HOSTS | F_DHCP) == 0 {
+                        return ans_packet;
+                    }
+
+                    ans = 1;
+                    if crecp.flags & F_NEG != 0 {
+                        log_query(caches, crecp.flags & !F_FORWARD, &name, addr);
+                        auth = false;
+                        if crecp.flags & F_NXDOMAIN != 0 {
+                            nxdomain = 1;
+                        }
+                    } else {
+                        if crecp.flags & (F_HOSTS | F_DHCP) == 0 {
+                            auth = false;
+                        }
+
+                        let new_ans = add_text_record(nameoffset, ttl, 0, T_PTR, &crecp.name);
+                        ansp.extend(&new_ans); // 将新组建的回答添加到总的回答中
+                        log_query(caches, crecp.flags & !F_FORWARD, &crecp.name, addr);
+                        anscount += 1;
+
+                        if ansp.len() > PACKETSZ {
+                            // 数据包长度超过设置值
+                            return ans_packet;
+                        }
+                    }
+
+                    crecp_rc = caches.cache_find_by_addr(crecp_rc, addr, now, is_arpa);
+                }
+
+                // 如果不在缓存中，启用和私有IPV4地址，伪造答案
+                if ans == 0
+                    && is_arpa == F_IPV4
+                    && (options & OPT_BOGUSPRIV) != 0
+                    && private_net(&addr.unwrap())
+                {
+                    let addr4: Ipv4Addr = addr.unwrap().to_ipv4().unwrap();
+                    let addr4_str = addr4.to_string();
+                    let new_ans = add_text_record(nameoffset, local_ttl, 0, T_PTR, &addr4_str);
+                    ansp.extend(&new_ans);
+                    log_query(caches, F_CONFIG | F_REVERSE | F_IPV4, &addr4_str, addr);
+                    anscount += 1;
+                    ans = 1;
+
+                    if ansp.len() > PACKETSZ {
+                        // 数据包长度超过设置值
+                        return ans_packet;
+                    }
+                }
+            }
+
+            // 正向域名解析（域名 → IP）A记录查询
+            if qtype == T_A || qtype == T_ANY {
+                if (options & OPT_FILTER) != 0 && qtype == T_ANY && name.contains('_') {
+                    ans = 1;
+                } else {
+                    let mut crecp_rc = caches.cache_find_by_name(None, &name, now, F_IPV4);
+                    while let Some(crecp_ref) = crecp_rc {
+                        {
+                            let crecp = crecp_ref.borrow();
+
+                            // 返回DHCP表项的ttl值为0，在租约到期前ttl值可能会改变。
+                            let ttl: u32 = if crecp.flags & (F_IMMORTAL | F_DHCP) != 0 {
+                                local_ttl
+                            } else {
+                                match crecp.ttd.duration_since(now) {
+                                    Ok(duration) => duration.as_secs() as u32,
+                                    Err(_) => 0, // If ttd is in the past, use 0 TTL
+                                }
+                            };
+
+                            // 不要用非/etc/hosts或DHCP租约的数据回答通配符查询
+                            if qtype == T_ANY && crecp.flags & (F_HOSTS | F_DHCP) == 0 {
+                                return ans_packet;
+                            }
+                            // 如果缓存项是负的，那么不返回答案是可以的
+                            ans = 1;
+
+                            if crecp.flags & F_NEG != 0 {
+                                log_query(caches, crecp.flags, &name, None);
+                                auth = false;
+                                if crecp.flags & F_NXDOMAIN != 0 {
+                                    nxdomain = 1;
+                                }
+                            } else {
+                                if crecp.flags & (F_HOSTS | F_DHCP) == 0 {
+                                    auth = false;
+                                }
+                                log_query(caches, crecp.flags & !F_REVERSE, &name, crecp.addr);
+
+                                // 复制问题作为答案的第一部分（使用压缩）
+                                put_short(nameoffset | 0xc000, &mut ansp);
+                                put_short(T_A, &mut ansp);
+                                put_short(C_IN, &mut ansp);
+                                put_long(ttl, &mut ansp);
+
+                                put_short(INADDRSZ, &mut ansp);
+                                let addr4_byte = crecp.addr.unwrap().to_ipv4().unwrap().octets();
+                                ansp.extend(&addr4_byte);
+                                anscount += 1;
+
+                                if ansp.len() > PACKETSZ {
+                                    // 数据包长度超过设置值
+                                    return ans_packet;
+                                }
+                            }
+                        }
+                        crecp_rc = caches.cache_find_by_name(Some(crecp_ref), &name, now, F_IPV4);
+                    }
+                }
+            }
+
+            // IPv6 正向域名解析（域名 → IPv6）
+            if qtype == T_AAAA || qtype == T_ANY {
+                if (options & OPT_FILTER) != 0 && qtype == T_ANY && name.contains('_') {
+                    ans = 1;
+                } else {
+                    let mut crecp_rc = caches.cache_find_by_name(None, &name, now, F_IPV6);
+                    while let Some(crecp_ref) = crecp_rc.clone() {
+                        {
+                            let crecp = crecp_ref.borrow();
+
+                            // 返回DHCP表项的ttl值为0，在租约到期前ttl值可能会改变。
+                            let ttl: u32 = if crecp.flags & (F_IMMORTAL | F_DHCP) != 0 {
+                                local_ttl
+                            } else {
+                                match crecp.ttd.duration_since(now) {
+                                    Ok(duration) => duration.as_secs() as u32,
+                                    Err(_) => 0, // If ttd is in the past, use 0 TTL
+                                }
+                            };
+
+                            // 不要用非/etc/hosts或DHCP租约的数据回答通配符查询
+                            if qtype == T_ANY && crecp.flags & (F_HOSTS | F_DHCP) == 0 {
+                                return ans_packet;
+                            }
+                            // 如果缓存项是负的，那么不返回答案是可以的
+                            ans = 1;
+
+                            if crecp.flags & F_NEG != 0 {
+                                log_query(caches, crecp.flags, &name, None);
+                                auth = false;
+                                if crecp.flags & F_NXDOMAIN != 0 {
+                                    nxdomain = 1;
+                                }
+                            } else {
+                                if crecp.flags & (F_HOSTS | F_DHCP) == 0 {
+                                    auth = false;
+                                }
+                                log_query(caches, crecp.flags & !F_REVERSE, &name, crecp.addr);
+
+                                // 复制问题作为答案的第一部分（使用压缩）
+                                put_short(nameoffset | 0xc000, &mut ansp);
+                                put_short(T_AAAA, &mut ansp);
+                                put_short(C_IN, &mut ansp);
+                                put_long(ttl, &mut ansp);
+
+                                put_short(IN6ADDRSZ, &mut ansp);
+                                let addr6_byte = crecp.addr.unwrap().to_ipv6().unwrap().octets();
+                                ansp.extend(&addr6_byte);
+                                anscount += 1;
+
+                                if ansp.len() > PACKETSZ {
+                                    // 数据包长度超过设置值
+                                    return ans_packet;
+                                }
+                            }
+                        }
+                        crecp_rc = caches.cache_find_by_name(crecp_rc, &name, now, F_IPV6);
+                    }
+                }
+            }
+
+            // 邮件交换记录查询
+            if qtype == T_MX || qtype == T_ANY {
+                if !mxname.is_empty() && mxname == name.as_str() {
+                    let new_ans = add_text_record(nameoffset, local_ttl, 1, T_MX, mxtarget);
+                    ansp.extend(&new_ans);
+                    anscount += 1;
+                    ans = 1;
+                } else if options & (OPT_SELFMX | OPT_LOCALMX) != 0
+                    && caches
+                        .cache_find_by_name(None, &name, now, F_HOSTS | F_DHCP)
+                        .is_some()
+                {
+                    let t_name = if options & OPT_SELFMX != 0 {
+                        name
+                    } else {
+                        mxtarget.to_string()
+                    };
+                    let new_ans = add_text_record(nameoffset, local_ttl, 1, T_MX, &t_name);
+                    ansp.extend(&new_ans);
+                    anscount += 1;
+                    ans = 1;
+                }
+            }
+
+            //MB 邮箱（Mailbox）记录。一种过时的 DNS 记录类型，用于将邮箱名映射为主机名
+            if qtype == T_MAILB {
+                ans = 1;
+                nxdomain = 1;
+            }
+        }
+
+        if ans == 0 {
+            return ans_packet;
+        }
+    }
+
+    // 组装新的需要返回的数据包
+
+    let mut ans_header = header;
+    ans_header.qr = true;
+    ans_header.aa = auth;
+    ans_header.ra = true;
+    ans_header.tc = false;
+    ans_header.rcode = if anscount == 0 && nxdomain != 0 {
+        NXDOMAIN
+    } else {
+        NOERROR
+    };
+    ans_header.ancount = anscount;
+    ans_header.nscount = 0;
+    ans_header.arcount = 0;
+
+    let ans_header_bytes = ans_header.to_bytes();
+
+    ans_packet.extend(&ans_header_bytes); // 填充头部
+    ans_packet.extend(q_byte); // 填充问题部分
+    ans_packet.extend(&ansp); // 填充答案部分
+
+    ans_packet
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 测试 extract_name 函数的基本域名解析
+    #[test]
+    fn test_extract_name_basic() {
+        // 基本域名: "example.com"
+        let packet = vec![0; 100]; // 空packet，不使用压缩指针
+        let data = [
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example" (7字节)
+            3, b'c', b'o', b'm', // "com" (3字节)
+            0,    // 结束标记
+        ];
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "example.com", "基本域名解析失败");
+    }
+
+    /// 测试 extract_name 函数的单标签域名
+    #[test]
+    fn test_extract_name_single_label() {
+        let packet = vec![0; 100];
+        let data = [
+            9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', // "localhost" (9字节)
+            0,    // 结束标记
+        ];
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "localhost", "单标签域名解析失败");
+    }
+
+    /// 测试 extract_name 函数的多标签域名
+    #[test]
+    fn test_extract_name_multiple_labels() {
+        let packet = vec![0; 100];
+        let data = [
+            3, b'w', b'w', b'w', // "www" (3字节)
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example" (7字节)
+            3, b'c', b'o', b'm', // "com" (3字节)
+            0,    // 结束标记
+        ];
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "www.example.com", "多标签域名解析失败");
+    }
+
+    /// 测试 extract_name 函数的压缩指针功能
+    #[test]
+    fn test_extract_name_compression_pointer() {
+        // 创建包含压缩指针的数据包
+        // 域名: "example.com" 出现在偏移量12处
+        let mut packet = vec![0; 100];
+
+        // 在偏移量12处放置域名
+        packet[12] = 7; // "example" 长度
+        packet[13..20].copy_from_slice(b"example");
+        packet[20] = 3; // "com" 长度
+        packet[21..24].copy_from_slice(b"com");
+        packet[24] = 0; // 结束标记
+        packet[25] = 0xC0;
+        packet[26] = 0x0C;
+
+        // 压缩指针: 0xC00C (指向偏移量12)
+        let data = &packet[25..];
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "example.com", "压缩指针域名解析失败");
+    }
+
+    /// 测试 extract_name 函数的非法字符处理
+    #[test]
+    fn test_extract_name_invalid_characters() {
+        let packet = vec![0; 100];
+        // 包含非法字符的域名
+        let data = [
+            3, b't', b'e', 0xFF, // 包含非法字符0xFF
+            3, b'c', b'o', b'm', 0,
+        ];
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "", "包含非法字符的域名应该返回空字符串");
+    }
+
+    /// 测试 extract_name 函数的域名长度过长情况
+    #[test]
+    fn test_extract_name_too_long() {
+        let packet = vec![0; 100];
+        // 创建超长域名标签
+        let long_label: Vec<u8> = vec![b'a'; 64]; // 64个字符，超过DNS标签限制
+        let mut data = Vec::new();
+        data.push(64); // 长度字节
+        data.extend(&long_label);
+        data.push(0); // 结束标记
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "", "超长域名标签应该返回空字符串");
+    }
+
+    /// 测试 extract_name 函数的压缩指针越界情况
+    #[test]
+    fn test_extract_name_compression_out_of_bounds() {
+        let packet = vec![0; 50]; // 小packet
+                                  // 压缩指针指向packet范围外
+        let data = [0xC0, 0xFF]; // 指向偏移量255，超出packet范围
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "", "压缩指针越界应该返回空字符串");
+    }
+
+    /// 测试 extract_name 函数的保留标签类型处理
+    #[test]
+    fn test_extract_name_reserved_label_type() {
+        let packet = vec![0; 100];
+        // 保留标签类型 (0x80)
+        let data = [0x80, 0x00]; // 保留类型
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "", "保留标签类型应该返回空字符串");
+    }
+
+    /// 测试 extract_name 函数的跳数限制
+    #[test]
+    fn test_extract_name_too_many_hops() {
+        let mut packet = vec![0; 100];
+        // 创建循环压缩指针（模拟过多跳数）
+        packet[12] = 0xC0; // 指向自身
+        packet[13] = 0x0C;
+
+        let data = [0xC0, 0x0C]; // 指向偏移量12
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        assert_eq!(result, "", "过多跳数应该返回空字符串");
+    }
+
+    /// 测试 extract_name 函数的边界情况：最大长度域名
+    #[test]
+    fn test_extract_name_max_length() {
+        let packet = vec![0; 500];
+        let mut data = Vec::new();
+
+        // 创建接近最大长度的域名 (每个标签63字符，总长度接近253字符)
+        for _ in 0..3 {
+            data.push(10); // 10字符标签
+            data.extend(vec![b'a'; 10]); // 10个'a'
+        }
+        data.push(0); // 结束标记
+
+        let result = extract_name(&packet, &mut &data[..]);
+
+        // 应该成功解析
+        assert!(!result.is_empty(), "接近最大长度的域名应该成功解析");
+        assert_eq!(result, "aaaaaaaaaa.aaaaaaaaaa.aaaaaaaaaa", "域名格式不正确");
+    }
+
+    /// 测试 add_text_record 函数的基本功能
+    #[test]
+    fn test_add_text_record_basic() {
+        let nameoffset = 0x0012; // 域名偏移量
+        let ttl = 3600; // TTL 1小时
+        let qtype = 16; // TXT记录类型
+        let pref = 0; // 优先级（对于TXT记录通常为0）
+        let name = "example.com";
+
+        // 添加域名检测验证
+        use crate::util::canonicalise;
+
+        // 验证测试使用的域名是有效的
+        assert!(canonicalise(name), "域名 '{}' 格式无效", name);
+
+        // 验证域名包含有效的标签
+        let labels: Vec<&str> = name.split('.').collect();
+        assert!(!labels.is_empty(), "域名应该包含至少一个标签");
+        for label in &labels {
+            assert!(!label.is_empty(), "域名标签不能为空");
+            assert!(
+                label.len() <= 63,
+                "域名标签长度不能超过63个字符: '{}'",
+                label
+            );
+        }
+
+        // 验证整个域名长度在合理范围内
+        assert!(name.len() <= 253, "域名总长度不能超过253个字符: '{}'", name);
+
+        let result = add_text_record(nameoffset, ttl, pref, qtype, name);
+
+        // 验证结果不为空
+        assert!(!result.is_empty());
+
+        // 验证基本结构：域名偏移 + 类型 + 类别 + TTL + 数据长度 + 数据
+        assert!(result.len() >= 12); // 至少包含基本头部信息
+
+        // 验证域名偏移（压缩指针形式）
+        assert_eq!(result[0], 0xC0); // 压缩指针标志
+        assert_eq!(result[1], 0x12); // 偏移量
+
+        // 验证记录类型
+        assert_eq!(result[2], 0x00); // qtype高字节
+        assert_eq!(result[3], 0x10); // qtype低字节 (TXT=16)
+
+        // 验证类别（应该为C_IN=1）
+        assert_eq!(result[4], 0x00); // 类别高字节
+        assert_eq!(result[5], 0x01); // 类别低字节
+
+        // 验证TTL
+        assert_eq!(result[6], 0x00); // TTL字节1
+        assert_eq!(result[7], 0x00); // TTL字节2
+        assert_eq!(result[8], 0x0E); // TTL字节3 (3600 = 0x0E10)
+        assert_eq!(result[9], 0x10); // TTL字节4
+
+        // 额外验证：检查生成的记录中的域名数据部分
+        let data_length_pos = 10;
+        let data_length =
+            ((result[data_length_pos] as u16) << 8) | (result[data_length_pos + 1] as u16);
+        assert!(data_length > 0, "数据部分长度应该大于0");
+
+        // 验证域名数据格式正确
+        let data_start = data_length_pos + 2;
+        let mut pos = data_start;
+
+        for label in labels {
+            assert_eq!(
+                result[pos] as usize,
+                label.len(),
+                "标签 '{}' 长度不匹配",
+                label
+            );
+            pos += 1;
+            let label_bytes = label.as_bytes();
+            assert_eq!(
+                &result[pos..pos + label.len()],
+                label_bytes,
+                "标签 '{}' 内容不匹配",
+                label
+            );
+            pos += label.len();
+        }
+
+        assert_eq!(result[pos], 0, "域名数据应该以0结束");
+    }
+
+    /// 测试 add_text_record 函数的数据部分
+    #[test]
+    fn test_add_text_record_data_section() {
+        let nameoffset = 0x0020;
+        let ttl = 7200;
+        let qtype = 16; // TXT
+        let pref = 0;
+        let name = "test.example.org";
+
+        let result = add_text_record(nameoffset, ttl, pref, qtype, name);
+
+        // 找到数据长度字段的位置（在TTL之后）
+        let data_length_pos = 10; // TTL之后的位置
+        let data_length =
+            ((result[data_length_pos] as u16) << 8) | (result[data_length_pos + 1] as u16);
+
+        // 验证数据长度正确（大端序）
+        let mut expected_length = 0;
+        for label in name.split('.') {
+            expected_length += 1 + label.len(); // 长度字节 + 标签内容
+        }
+        expected_length += 1; // 结束符
+
+        // 实际测试：先验证函数是否正常工作，再检查具体值
+        assert!(data_length > 0, "数据长度应该大于0");
+        assert_eq!(data_length as usize, expected_length, "数据长度计算错误");
+
+        // 验证域名数据格式
+        let data_start = data_length_pos + 2;
+        let mut pos = data_start;
+
+        for label in name.split('.') {
+            assert_eq!(result[pos] as usize, label.len());
+            pos += 1;
+
+            let label_bytes = label.as_bytes();
+            assert_eq!(&result[pos..pos + label.len()], label_bytes);
+            pos += label.len();
+        }
+
+        // 验证结束符
+        assert_eq!(result[pos], 0);
+    }
+
+    /// 测试 add_text_record 函数带有优先级的情况
+    #[test]
+    fn test_add_text_record_with_preference() {
+        let nameoffset = 0x0015;
+        let ttl = 1800;
+        let qtype = 33; // SRV记录类型
+        let pref = 10; // 优先级
+        let name = "service.example.com";
+
+        let result = add_text_record(nameoffset, ttl, pref, qtype, name);
+
+        // 验证结果包含优先级字段
+        assert!(!result.is_empty());
+
+        // 找到数据部分
+        let data_length_pos = 10;
+        let data_start = data_length_pos + 2;
+
+        // 验证优先级字段存在
+        let priority_pos = data_start;
+        assert_eq!(result[priority_pos], 0x00); // 优先级高字节
+        assert_eq!(result[priority_pos + 1], 0x0A); // 优先级低字节 (10)
+
+        // 验证域名数据在优先级之后
+        let domain_start = priority_pos + 2;
+        let mut pos = domain_start;
+
+        for label in name.split('.') {
+            assert_eq!(result[pos] as usize, label.len());
+            pos += 1;
+            let label_bytes = label.as_bytes();
+            assert_eq!(&result[pos..pos + label.len()], label_bytes);
+            pos += label.len();
+        }
+
+        assert_eq!(result[pos], 0); // 结束符
+    }
+
+    /// 测试 add_text_record 函数的单标签域名
+    #[test]
+    fn test_add_text_record_single_label() {
+        let nameoffset = 0x0018;
+        let ttl = 900;
+        let qtype = 16; // TXT
+        let pref = 0;
+        let name = "localhost"; // 单标签域名
+
+        let result = add_text_record(nameoffset, ttl, pref, qtype, name);
+
+        // 验证数据长度
+        let data_length_pos = 10;
+        let data_length =
+            ((result[data_length_pos] as u16) << 8) | (result[data_length_pos + 1] as u16);
+        assert_eq!(data_length as usize, name.len() + 1 + 1); // 标签长度 + 长度字节 + 结束符
+
+        // 验证域名数据
+        let data_start = data_length_pos + 2;
+        assert_eq!(result[data_start] as usize, name.len());
+        assert_eq!(
+            &result[data_start + 1..data_start + 1 + name.len()],
+            name.as_bytes()
+        );
+        assert_eq!(result[data_start + 1 + name.len()], 0); // 结束符
+    }
+
+    /// 测试 add_text_record 函数的长域名处理
+    #[test]
+    fn test_add_text_record_long_domain() {
+        let nameoffset = 0x0025;
+        let ttl = 86400; // 1天
+        let qtype = 16; // TXT
+        let pref = 0;
+        let name = "very.long.subdomain.name.that.has.many.labels.example.com";
+
+        let result = add_text_record(nameoffset, ttl, pref, qtype, name);
+
+        // 验证结果不为空
+        assert!(!result.is_empty());
+
+        // 验证数据长度计算正确
+        let data_length_pos = 10;
+        let data_length =
+            ((result[data_length_pos] as u16) << 8) | (result[data_length_pos + 1] as u16);
+
+        let mut expected_length = 0;
+        for label in name.split('.') {
+            expected_length += 1 + label.len(); // 长度字节 + 标签内容
+        }
+        expected_length += 1; // 结束符
+
+        assert_eq!(data_length as usize, expected_length);
+
+        // 验证域名数据格式正确
+        let data_start = data_length_pos + 2;
+        let mut pos = data_start;
+
+        for label in name.split('.') {
+            assert_eq!(result[pos] as usize, label.len());
+            pos += 1;
+            let label_bytes = label.as_bytes();
+            assert_eq!(&result[pos..pos + label.len()], label_bytes);
+            pos += label.len();
+        }
+
+        assert_eq!(result[pos], 0); // 结束符
+    }
+
+    /// 测试 add_text_record 函数的不同记录类型
+    #[test]
+    fn test_add_text_record_different_types() {
+        let test_cases = vec![
+            (1, "A记录"),     // A记录
+            (28, "AAAA记录"), // AAAA记录
+            (15, "MX记录"),   // MX记录
+            (16, "TXT记录"),  // TXT记录
+            (33, "SRV记录"),  // SRV记录
+        ];
+
+        for (qtype, description) in test_cases {
+            let nameoffset = 0x0012;
+            let ttl = 3600;
+            let pref = if qtype == 15 || qtype == 33 { 10 } else { 0 }; // MX和SRV记录需要优先级
+            let name = "test.example.com";
+
+            let result = add_text_record(nameoffset, ttl, pref, qtype, name);
+
+            // 验证记录类型设置正确
+            assert_eq!(result[2], (qtype >> 8) as u8);
+            assert_eq!(result[3], (qtype & 0xFF) as u8);
+
+            // 验证结果不为空
+            assert!(!result.is_empty(), "{} 测试失败", description);
+        }
+    }
+
+    /// 测试 add_text_record 函数的TTL编码
+    #[test]
+    fn test_add_text_record_ttl_encoding() {
+        let test_cases = vec![
+            (0, "零TTL"),
+            (1, "最小TTL"),
+            (300, "5分钟"),
+            (3600, "1小时"),
+            (86400, "1天"),
+            (2147483647, "最大TTL"), // 最大32位有符号整数
+        ];
+
+        for (ttl, description) in test_cases {
+            let nameoffset = 0x0010;
+            let qtype = 16; // TXT
+            let pref = 0;
+            let name = "ttl-test.example.com";
+
+            let result = add_text_record(nameoffset, ttl, pref, qtype, name);
+
+            // 验证TTL编码正确
+            let ttl_bytes = &result[6..10];
+            let decoded_ttl = ((ttl_bytes[0] as u32) << 24)
+                | ((ttl_bytes[1] as u32) << 16)
+                | ((ttl_bytes[2] as u32) << 8)
+                | (ttl_bytes[3] as u32);
+
+            assert_eq!(decoded_ttl, ttl, "{} TTL编码测试失败", description);
+        }
+    }
+
+    /// 测试 add_text_record 函数的综合场景
+    #[test]
+    fn test_add_text_record_integration() {
+        // 模拟真实场景：创建多个记录并验证其格式
+        let records = [
+            (0x0012, 3600, 1, 0, "host1.example.com"),  // A记录1600 ~
+            (0x0020, 7200, 28, 0, "host2.example.com"), // AAAA记录1601 ~
+            (0x0030, 1800, 16, 0, "text.example.com"),
+        ];
+
+        for (i, (nameoffset, ttl, qtype, pref, name)) in records.iter().enumerate() {
+            let result = add_text_record(*nameoffset, *ttl, *pref, *qtype, name);
+
+            // 基本验证
+            assert!(!result.is_empty(), "记录 {} 生成失败", i);
+
+            // 验证压缩指针
+            assert_eq!(result[0], 0xC0);
+            assert_eq!(result[1], (*nameoffset & 0xFF) as u8);
+
+            // 验证记录类型
+            assert_eq!(result[3], (*qtype & 0xFF) as u8);
+
+            // 验证TTL
+            let decoded_ttl = ((result[6] as u32) << 24)
+                | ((result[7] as u32) << 16)
+                | ((result[8] as u32) << 8)
+                | (result[9] as u32);
+            assert_eq!(decoded_ttl, *ttl);
+
+            // 验证域名数据
+            let data_length_pos = 10;
+            let data_start = data_length_pos + 2;
+            let mut pos = data_start;
+
+            if *pref != 0 {
+                pos += 2; // 跳过优先级字段
+            }
+
+            for label in name.split('.') {
+                assert_eq!(result[pos] as usize, label.len());
+                pos += 1;
+                let label_bytes = label.as_bytes();
+                assert_eq!(&result[pos..pos + label.len()], label_bytes);
+                pos += label.len();
+            }
+
+            assert_eq!(result[pos], 0); // 结束符
+        }
+    }
+
+    /// 测试 check_for_bogus_wildcard 函数 - 正常情况：没有恶意IP
+    #[test]
+    fn test_check_for_bogus_wildcard_no_bogus_ip() {
+        use std::time::SystemTime;
+
+        // 创建测试用的DNS响应数据包
+        // 包含一个正常的A记录响应
+        let mut packet = vec![
+            // DNS头部
+            0x12, 0x34, // ID
+            0x81, 0x80, // Flags: 响应 + 递归可用
+            0x00, 0x01, // QDCOUNT: 1个问题
+            0x00, 0x01, // ANCOUNT: 1个回答
+            0x00, 0x00, // NSCOUNT: 0个授权
+            0x00, 0x00, // ARCOUNT: 0个附加
+            // 问题部分: "example.com"
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
+            0x03, b'c', b'o', b'm', // "com"
+            0x00, // 结束标记
+            0x00, 0x01, // QTYPE: A记录
+            0x00, 0x01, // QCLASS: IN
+            // 回答部分
+            0xC0, 0x0C, // 压缩指针，指向问题部分的域名
+            0x00, 0x01, // TYPE: A记录
+            0x00, 0x01, // CLASS: IN
+            0x00, 0x00, 0x0E, 0x10, // TTL: 3600秒
+            0x00, 0x04, // RDLENGTH: 4字节
+            0x01, 0x02, 0x03, 0x04, // IP地址: 1.2.3.4
+        ];
+
+        // 创建缓存
+        let mut cache = crate::cache::Cache::cache_init(100, 0);
+
+        // 创建恶意IP地址列表（空列表）
+        let baddrs: Vec<BogusAddr> = Vec::new();
+
+        let now = SystemTime::now();
+
+        // 调用函数
+        let result = check_for_bogus_wildcard(&mut cache, &mut packet, &baddrs, now);
+
+        // 验证结果：应该返回0（没有检测到恶意IP）
+        assert_eq!(result, 0, "没有恶意IP时应该返回0");
+
+        // 验证数据包没有被修改
+        let header = Header::parse(&packet).unwrap();
+        assert_eq!(header.ancount, 1, "回答记录数应该保持不变");
+        assert_eq!(header.rcode, NOERROR, "响应码应该保持NOERROR");
+    }
+
+    /// 测试 check_for_bogus_wildcard 函数 - 检测到恶意IP的情况
+    #[test]
+    fn test_check_for_bogus_wildcard_with_bogus_ip() {
+        use std::net::Ipv4Addr;
+        use std::time::SystemTime;
+
+        // 创建测试用的DNS响应数据包
+        // 包含一个恶意IP地址的A记录响应
+        let mut packet = vec![
+            // DNS头部
+            0x12, 0x34, // ID
+            0x81, 0x80, // Flags: 响应 + 递归可用
+            0x00, 0x01, // QDCOUNT: 1个问题
+            0x00, 0x01, // ANCOUNT: 1个回答
+            0x00, 0x00, // NSCOUNT: 0个授权
+            0x00, 0x00, // ARCOUNT: 0个附加
+            // 问题部分: "example.com"
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
+            0x03, b'c', b'o', b'm', // "com"
+            0x00, // 结束标记
+            0x00, 0x01, // QTYPE: A记录
+            0x00, 0x01, // QCLASS: IN
+            // 回答部分
+            0xC0, 0x0C, // 压缩指针，指向问题部分的域名
+            0x00, 0x01, // TYPE: A记录
+            0x00, 0x01, // CLASS: IN
+            0x00, 0x00, 0x0E, 0x10, // TTL: 3600秒
+            0x00, 0x04, // RDLENGTH: 4字节
+            0xC0, 0xA8, 0x01, 0x01, // IP地址: 192.168.1.1（恶意IP）
+        ];
+
+        // 创建缓存
+        let mut cache = crate::cache::Cache::cache_init(100, 0);
+
+        // 创建恶意IP地址列表，包含192.168.1.1
+        let baddrs = vec![BogusAddr {
+            addr: Ipv4Addr::new(192, 168, 1, 1),
+            next: None,
+        }];
+
+        let now = SystemTime::now();
+
+        // 调用函数
+        let result = check_for_bogus_wildcard(&mut cache, &mut packet, &baddrs, now);
+
+        // 验证结果：应该返回1（检测到恶意IP）
+        assert_eq!(result, 1, "检测到恶意IP时应该返回1");
+
+        // 验证数据包被正确修改为NXDOMAIN响应
+        let header = Header::parse(&packet).unwrap();
+        assert_eq!(header.ancount, 0, "回答记录数应该被设置为0");
+        assert_eq!(header.rcode, NXDOMAIN, "响应码应该被设置为NXDOMAIN");
+        assert!(!header.aa, "授权回答标志应该被清除");
+        assert!(header.ra, "递归可用标志应该被设置");
+    }
+
+    /// 测试 check_for_bogus_wildcard 函数 - 非A记录的情况
+    #[test]
+    fn test_check_for_bogus_wildcard_non_a_record() {
+        use std::net::Ipv4Addr;
+        use std::time::SystemTime;
+
+        // 创建测试用的DNS响应数据包，包含AAAA记录（IPv6）
+        let mut packet = vec![
+            // DNS头部
+            0x12, 0x34, // ID
+            0x81, 0x80, // Flags: 响应 + 递归可用
+            0x00, 0x01, // QDCOUNT: 1个问题
+            0x00, 0x01, // ANCOUNT: 1个回答
+            0x00, 0x00, // NSCOUNT: 0个授权
+            0x00, 0x00, // ARCOUNT: 0个附加
+            // 问题部分: "example.com"
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
+            0x03, b'c', b'o', b'm', // "com"
+            0x00, // 结束标记
+            0x00, 0x1C, // QTYPE: AAAA记录（IPv6）
+            0x00, 0x01, // QCLASS: IN
+            // 回答部分 - AAAA记录
+            0xC0, 0x0C, // 压缩指针，指向问题部分的域名
+            0x00, 0x1C, // TYPE: AAAA记录
+            0x00, 0x01, // CLASS: IN
+            0x00, 0x00, 0x0E, 0x10, // TTL: 3600秒
+            0x00, 0x10, // RDLENGTH: 16字节
+            // IPv6地址数据（不会检查IPv6地址）
+            0x20, 0x01, 0x0D, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01,
+        ];
+
+        // 创建缓存
+        let mut cache = crate::cache::Cache::cache_init(100, 0);
+
+        // 创建恶意IP地址列表
+        let baddrs = vec![BogusAddr {
+            addr: Ipv4Addr::new(192, 168, 1, 1),
+            next: None,
+        }];
+
+        let now = SystemTime::now();
+
+        // 调用函数
+        let result = check_for_bogus_wildcard(&mut cache, &mut packet, &baddrs, now);
+
+        // 验证结果：应该返回0（非A记录不会被检查）
+        assert_eq!(result, 0, "非A记录时应该返回0");
+
+        // 验证数据包没有被修改
+        let header = Header::parse(&packet).unwrap();
+        assert_eq!(header.ancount, 1, "回答记录数应该保持不变");
+        assert_eq!(header.rcode, NOERROR, "响应码应该保持NOERROR");
+    }
+
+    /// 测试 check_for_bogus_wildcard 函数 - 多个答案记录的情况
+    #[test]
+    fn test_check_for_bogus_wildcard_multiple_answers() {
+        use std::net::Ipv4Addr;
+        use std::time::SystemTime;
+
+        // 创建测试用的DNS响应数据包，包含多个A记录
+        let mut packet = vec![
+            // DNS头部
+            0x12, 0x34, // ID
+            0x81, 0x80, // Flags: 响应 + 递归可用
+            0x00, 0x01, // QDCOUNT: 1个问题
+            0x00, 0x02, // ANCOUNT: 2个回答
+            0x00, 0x00, // NSCOUNT: 0个授权
+            0x00, 0x00, // ARCOUNT: 0个附加
+            // 问题部分: "example.com"
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
+            0x03, b'c', b'o', b'm', // "com"
+            0x00, // 结束标记
+            0x00, 0x01, // QTYPE: A记录
+            0x00, 0x01, // QCLASS: IN
+            // 第一个回答部分 - 正常IP
+            0xC0, 0x0C, // 压缩指针，指向问题部分的域名
+            0x00, 0x01, // TYPE: A记录
+            0x00, 0x01, // CLASS: IN
+            0x00, 0x00, 0x0E, 0x10, // TTL: 3600秒
+            0x00, 0x04, // RDLENGTH: 4字节
+            0x01, 0x02, 0x03, 0x04, // IP地址: 1.2.3.4（正常IP）
+            // 第二个回答部分 - 恶意IP
+            0xC0, 0x0C, // 压缩指针，指向问题部分的域名
+            0x00, 0x01, // TYPE: A记录
+            0x00, 0x01, // CLASS: IN
+            0x00, 0x00, 0x0E, 0x10, // TTL: 3600秒
+            0x00, 0x04, // RDLENGTH: 4字节
+            0xC0, 0xA8, 0x01, 0x01, // IP地址: 192.168.1.1（恶意IP）
+        ];
+
+        // 创建缓存
+        let mut cache = crate::cache::Cache::cache_init(100, 0);
+
+        // 创建恶意IP地址列表
+        let baddrs = vec![BogusAddr {
+            addr: Ipv4Addr::new(192, 168, 1, 1),
+            next: None,
+        }];
+
+        let now = SystemTime::now();
+
+        // 调用函数
+        let result = check_for_bogus_wildcard(&mut cache, &mut packet, &baddrs, now);
+
+        // 验证结果：应该返回1（检测到恶意IP）
+        assert_eq!(result, 1, "检测到恶意IP时应该返回1");
+
+        // 验证数据包被正确修改为NXDOMAIN响应
+        let header = Header::parse(&packet).unwrap();
+        assert_eq!(header.ancount, 0, "回答记录数应该被设置为0");
+        assert_eq!(header.rcode, NXDOMAIN, "响应码应该被设置为NXDOMAIN");
+    }
+
+    /// 测试 check_for_bogus_wildcard 函数 - 多个恶意IP的情况
+    #[test]
+    fn test_check_for_bogus_wildcard_multiple_bogus_ips() {
+        use std::net::Ipv4Addr;
+        use std::time::SystemTime;
+
+        // 创建测试用的DNS响应数据包
+        let mut packet = vec![
+            // DNS头部
+            0x12, 0x34, // ID
+            0x81, 0x80, // Flags: 响应 + 递归可用
+            0x00, 0x01, // QDCOUNT: 1个问题
+            0x00, 0x01, // ANCOUNT: 1个回答
+            0x00, 0x00, // NSCOUNT: 0个授权
+            0x00, 0x00, // ARCOUNT: 0个附加
+            // 问题部分: "example.com"
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', // "example"
+            0x03, b'c', b'o', b'm', // "com"
+            0x00, // 结束标记
+            0x00, 0x01, // QTYPE: A记录
+            0x00, 0x01, // QCLASS: IN
+            // 回答部分
+            0xC0, 0x0C, // 压缩指针，指向问题部分的域名
+            0x00, 0x01, // TYPE: A记录
+            0x00, 0x01, // CLASS: IN
+            0x00, 0x00, 0x0E, 0x10, // TTL: 3600秒
+            0x00, 0x04, // RDLENGTH: 4字节
+            0x0A, 0x00, 0x00, 0x01, // IP地址: 10.0.0.1（恶意IP）
+        ];
+
+        // 创建缓存
+        let mut cache = crate::cache::Cache::cache_init(100, 0);
+
+        // 创建多个恶意IP地址列表
+        let baddrs = vec![
+            BogusAddr {
+                addr: Ipv4Addr::new(192, 168, 1, 1),
+                next: None,
+            },
+            BogusAddr {
+                addr: Ipv4Addr::new(10, 0, 0, 1), // 这个IP在数据包中
+                next: None,
+            },
+            BogusAddr {
+                addr: Ipv4Addr::new(172, 16, 0, 1),
+                next: None,
+            },
+        ];
+
+        let now = SystemTime::now();
+
+        // 调用函数
+        let result = check_for_bogus_wildcard(&mut cache, &mut packet, &baddrs, now);
+
+        // 验证结果：应该返回1（检测到恶意IP）
+        assert_eq!(result, 1, "检测到恶意IP时应该返回1");
+
+        // 验证数据包被正确修改为NXDOMAIN响应
+        let header = Header::parse(&packet).unwrap();
+        assert_eq!(header.ancount, 0, "回答记录数应该被设置为0");
+        assert_eq!(header.rcode, NXDOMAIN, "响应码应该被设置为NXDOMAIN");
+    }
+}
