@@ -4,368 +4,378 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#![allow(
-    clippy::collapsible_if,
-    clippy::collapsible_else_if,
-    clippy::op_ref,
-    clippy::too_many_arguments,
-    clippy::unnecessary_mut_passed,
-    clippy::needless_borrow
-)]
-
-use crate::rfc2131::*;
-use crate::*;
-use pnet::packet::ethernet::MutableEthernetPacket;
+use crate::cache::Cache;
+use crate::config::{DHCP_CLIENT_PORT, DHCP_SERVER_PORT};
+use crate::dnsmasq::{
+    DhcpConfig, DhcpContext, DhcpOpt, DhcpPacket, ETHER_ADDR_LEN, IPVERSION, PACKETSZ,
+};
+use crate::lease::{lease_find_by_addr, lease_prune, lease_update_dns};
+use crate::logs::LOG_ERR;
+use crate::rfc2131::{dncp_reply, DncpReplyArgs};
+use crate::syslog;
+use libc::{htons, AF_PACKET, ETH_P_IP};
 use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::ipv4::MutableIpv4Packet;
+use pnet::packet::ipv4::{Ipv4Flags, MutableIpv4Packet};
 use pnet::packet::udp::MutableUdpPacket;
+use pnet::packet::util::ipv4_checksum;
 use pnet::packet::Packet;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use pnet::util;
+use socket2::{SockAddr, SockAddrStorage};
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-const PACKETSZ: usize = 1500; // 数据包的最大大小
-const DHCP_SERVER_PORT: u16 = 67; // DHCP服务器端口
-const DHCP_CLIENT_PORT: u16 = 68; // DHCP客户端端口
-const ETHERTYPE_IP: u16 = 0x0800;
-const ETHER_ADDR_LEN: usize = 6;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Ip {
-    pub version_and_header_length: u8,
-    pub tos: u8,
-    pub total_length: u16,
-    pub id: u16,
-    pub flags_and_fragment_offset: u16,
-    pub ttl: u8,
-    pub protocol: u8,
-    pub checksum: u16,
-    pub src_addr: InAddr,
-    pub dst_addr: InAddr,
+pub struct DhcpPacketArgs<'a> {
+    pub c_lease_file: &'a PathBuf,
+    pub dhcp_configs: &'a [DhcpConfig],
+    pub domain_suffix: &'a Option<String>,
+    pub dhcp_file: &'a Path,
+    pub dhcp_sname: &'a Option<String>,
+    pub dhcp_next_server: Ipv4Addr,
+    pub dhcp_options: &'a [DhcpOpt],
+    pub cache: &'a mut Cache,
+    pub now: SystemTime,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct UdpHdr {
-    pub uh_sport: u16,
-    pub uh_dport: u16,
-    pub uh_ulen: u16,
-    pub uh_sum: u16,
-}
+pub fn dhcp_packet(context: &mut DhcpContext, args: DhcpPacketArgs<'_>) {
+    let DhcpPacketArgs {
+        c_lease_file,
+        dhcp_configs,
+        domain_suffix,
+        dhcp_file,
+        dhcp_sname,
+        dhcp_next_server,
+        dhcp_options,
+        cache,
+        now,
+    } = args;
+    let sz: usize;
+    let mut newlen: i32;
+    let mut packet = [0u8; PACKETSZ - 20 + 8]; // 20 is the size of IPv4 header
+    let udp_socket: std::net::UdpSocket;
+    // 接收数据
+    if let Some(fd_socket) = &context.fd_socket {
+        // 转换为UdpSocket以便接收数据
+        udp_socket = match fd_socket.try_clone() {
+            Ok(socket) => socket.into(),
+            Err(_) => return,
+        };
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct DhcpPacket {
-    pub op: u8,
-    pub htype: u8,
-    pub hlen: u8,
-    pub hops: u8,
-    pub xid: u32,
-    pub secs: u16,
-    pub flags: u16,
-    pub ciaddr: InAddr,
-    pub yiaddr: InAddr,
-    pub siaddr: InAddr,
-    pub giaddr: InAddr,
-    pub chaddr: [u8; 6],
-    pub sname: [u8; 64],
-    pub file: [u8; 128],
-    pub cookie: u32,
-    pub options: [u8; 308],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct UdpDhcpPacket {
-    pub ip: Ip,
-    pub udp: UdpHdr,
-    pub data: DhcpPacket,
-}
-// DHCP 配置列表中查找与给定参数匹配的配置项
-pub fn find_config(
-    configs: &mut Option<Box<DhcpConfig>>,
-    context: Option<&DhcpContext>,
-    clid: Vec<u8>,                 // 客户端标识符
-    clid_len: usize,               // 客户端标识符长度
-    hwaddr: &[u8; ETHER_ADDR_LEN], // 硬件地址
-    hostname: Option<&str>,        // 主机名
-) -> Option<Box<DhcpConfig>> {
-    let mut config_ptr = configs.as_mut();
-
-    // 查找基于 clid
-    if clid_len > 0 {
-        while let Some(config) = config_ptr {
-            // 检查 clid 是否匹配
-            if config.clid_len == clid_len && config.clid == clid {
-                if is_addr_in_context(context, config) {
-                    return Some(config.clone()); // 返回匹配的配置
-                }
+        sz = match udp_socket.recv_from(&mut packet) {
+            Ok((n, _)) => {
+                // Process the received packet here
+                n
             }
-
-            // 处理 ASCII client ID 的前缀问题
-            if clid[0] == 0 && config.clid_len == clid_len - 1 && &config.clid[..] == &clid[1..] {
-                if is_addr_in_context(context, config) {
-                    return Some(config.clone()); // 返回匹配的配置
-                }
-            }
-
-            config_ptr = config.next.as_mut(); // 移动到下一个配置
+            Err(_) => 0,
         }
+    } else {
+        return;
     }
 
-    // 查找基于 hwaddr
-    config_ptr = configs.as_mut();
-    while let Some(config) = config_ptr {
-        if &config.hwaddr == hwaddr && is_addr_in_context(context, config) {
-            return Some(config.clone()); // 返回匹配的配置
-        }
-        config_ptr = config.next.as_mut(); // 移动到下一个配置
-    }
+    // 数据转换为mess类型
+    if let Ok(mut parsed_packet) = DhcpPacket::parse(&packet) {
+        let mess = &mut parsed_packet;
+        if sz > 236 {
+            // 236 DHCP 协议数据包本体，固定格式部分（共 236 字节）
+            lease_prune(None, now);
 
-    // 查找基于 hostname
-    if let Some(host) = hostname {
-        config_ptr = configs.as_mut();
-        while let Some(config) = config_ptr {
-            if let Some(ref config_hostname) = config.hostname {
-                if config_hostname == host && is_addr_in_context(context, config) {
-                    return Some(config.clone()); // 返回匹配的配置
-                }
-            }
-            config_ptr = config.next.as_mut(); // 移动到下一个配置
-        }
-    }
-
-    None // 如果没有找到，返回 None
-}
-
-//判断一个 DHCP 配置的地址是否在给定的上下文中
-pub fn is_addr_in_context(context: Option<&DhcpContext>, config: &DhcpConfig) -> bool {
-    // 如果没有上下文，返回 true
-    if context.is_none() {
-        return true;
-    }
-
-    let context = context.unwrap();
-
-    // 如果配置的地址为 0.0.0.0，返回 true
-    if config.addr == InAddr::new(0) {
-        return true;
-    }
-
-    // 检查地址是否在上下文中
-    let addr_masked = config
-        .addr
-        .s_addr
-        .octets()
-        .iter()
-        .zip(context.netmask.s_addr.octets().iter())
-        .map(|(&a, &m)| a & m)
-        .collect::<Vec<u8>>();
-
-    let start_masked = context
-        .start
-        .s_addr
-        .octets()
-        .iter()
-        .zip(context.netmask.s_addr.octets().iter())
-        .map(|(&s, &m)| s & m)
-        .collect::<Vec<u8>>();
-
-    addr_masked == start_masked // 返回是否相等
-}
-
-// 处理 DHCP 数据包
-pub fn dhcp_packet(
-    caches: &mut Cache,
-    context: Option<&mut DhcpContext>,
-    packet: &mut Vec<u8>,
-    dhcp_opts: &mut Option<Box<DhcpOpt>>,
-    mut dhcp_configs: &mut Option<Box<DhcpConfig>>,
-    now: SystemTime,
-    namebuff: &mut [u8],
-    domain_suffix: &mut Option<String>,
-    dhcp_file: &mut Option<String>,
-    dhcp_sname: &mut Option<String>,
-    dhcp_next_server: InAddr, // 修改后的类型为 InAddr
-) {
-    // 将接收到的数据转换为 UdpDhcpPacket 结构体
-    let rawpacket = unsafe { &mut *(packet.as_mut_ptr() as *mut UdpDhcpPacket) };
-
-    // 如果有 DHCP 上下文则继续处理
-    if let Some(context) = context {
-        let socket = UdpSocket::bind(SocketAddr::new(
-            Ipv4Addr::UNSPECIFIED.into(),
-            DHCP_SERVER_PORT,
-        ))
-        .expect("Failed to bind to DHCP server port");
-
-        let sz = socket.recv(packet).expect("Failed to receive packet");
-
-        // 检查数据包是否为有效大小
-        if sz > std::mem::size_of::<DhcpPacket>() {
-            lease_prune(None, now); // 清除过期租约
-
-            let mut domain_suffix_str = domain_suffix.as_deref().unwrap_or("");
-
-            let newlen = dhcp_reply(
-                context,
-                &mut rawpacket.data,
-                sz,
-                now,
-                namebuff,
-                &mut <Option<Box<option::DhcpOpt>> as Clone>::clone(&dhcp_opts).unwrap(),
-                &mut dhcp_configs,
-                &mut domain_suffix_str,
+            newlen = dncp_reply(DncpReplyArgs {
+                context: Some(context),
+                mess,
+                dhcp_configs,
+                domain_suffix,
                 dhcp_file,
                 dhcp_sname,
-                dhcp_next_server, // 直接传递 InAddr 类型
-            );
+                dhcp_next_server,
+                dhcp_options,
+                sz,
+                now,
+            }); // 解析数据
 
-            let _ = lease_update_dns(caches, 0); // 更新 DNS 租约
+            lease_update_dns(c_lease_file, cache, false);
 
             if newlen != 0 {
-                let mut broadcast = (u16::from_be(rawpacket.data.flags) & 0x8000) != 0;
+                let mut broadcast = mess.flags & 0x8000; // 是否需要广播
 
                 if newlen < 0 {
-                    broadcast = true;
+                    // 广播消息
+                    broadcast = 1;
+                    newlen = -newlen
                 }
 
-                if !rawpacket.data.giaddr.is_unspecified()
-                    || !rawpacket.data.ciaddr.is_unspecified()
-                {
-                    let dest = SocketAddr::new(
-                        if !rawpacket.data.giaddr.is_unspecified() {
-                            std::net::IpAddr::V4(rawpacket.data.giaddr.to_ipv4_addr())
-                        } else {
-                            std::net::IpAddr::V4(rawpacket.data.ciaddr.to_ipv4_addr())
-                        },
-                        if !rawpacket.data.giaddr.is_unspecified() {
-                            DHCP_SERVER_PORT
-                        } else {
-                            DHCP_CLIENT_PORT
-                        },
-                    );
+                if !mess.giaddr.is_unspecified() || !mess.ciaddr.is_unspecified() {
+                    let dest = if !mess.giaddr.is_unspecified() {
+                        SocketAddrV4::new(mess.giaddr, DHCP_SERVER_PORT)
+                    } else {
+                        SocketAddrV4::new(mess.ciaddr, DHCP_CLIENT_PORT)
+                    };
 
-                    socket
-                        .send_to(&packet[..newlen as usize], dest)
-                        .expect("Failed to send DHCP packet");
+                    let _ = udp_socket.send_to(&mess.to_vec(), dest);
                 } else {
-                    if broadcast {
-                        let mut ethernet_buffer = [0u8; 42]; // 42字节是以太网帧头的大小
-                        let mut ethernet_packet =
-                            MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
-                        ethernet_packet.set_destination([0xff; 6].into());
-                        ethernet_packet.set_source(context.hwaddr.into());
-                        ethernet_packet
-                            .set_ethertype(pnet::packet::ethernet::EtherType(ETHERTYPE_IP));
+                    let mut dest = libc::sockaddr_ll {
+                        sll_family: AF_PACKET as u16,
+                        sll_protocol: htons(ETH_P_IP as u16),
+                        sll_ifindex: context.ifindex as i32,
+                        sll_hatype: 0,
+                        sll_pkttype: 0,
+                        sll_halen: ETHER_ADDR_LEN as u8,
+                        sll_addr: [0u8; 8],
+                    };
 
-                        let mut ipv4_buffer = [0u8; 20]; // 20字节是IPv4头的大小
-                        let mut ipv4_packet = MutableIpv4Packet::new(&mut ipv4_buffer).unwrap();
-                        ipv4_packet.set_version(4);
-                        ipv4_packet.set_header_length(5);
-                        ipv4_packet.set_total_length((20 + newlen as u16) as u16);
-                        ipv4_packet.set_next_level_protocol(IpNextHeaderProtocols::Udp);
-                        ipv4_packet.set_source(u32::from_be(context.serv_addr.s_addr).into());
-                        ipv4_packet.set_destination(Ipv4Addr::BROADCAST);
-                        ipv4_packet.set_checksum(ipv4_checksum(&ipv4_packet));
+                    // 够建发送IP层一下的数据包，绕过内核ip 客户端首次请求ip时，服务端无法通过ip地址和客户端通信
+                    // 1. 计算各层长度
+                    let ip_header_len: usize = 20; // IP 头部标准长度 (5 * 4 = 20 字节)
+                    let udp_header_len: usize = 8; // UDP 头部标准长度
+                    let total_len = ip_header_len + udp_header_len + newlen as usize;
 
-                        let mut udp_buffer = [0u8; 8 + PACKETSZ]; // 8字节是UDP头的大小
-                        let mut udp_packet =
-                            MutableUdpPacket::new(&mut udp_buffer[..8 + newlen as usize]).unwrap();
+                    // 2. 分配缓冲区 dhcp返回数据包，dhcp头 + udp头 + data数据
+                    let mut buffer = vec![0u8; total_len];
+
+                    // 使用 split_at_mut 创建非重叠的可变切片
+                    let (ip_slice, rest) = buffer.split_at_mut(ip_header_len);
+                    let (udp_slice, dhcp_slice) = rest.split_at_mut(udp_header_len);
+
+                    // 3. 填充 IP 头部
+                    let mut ip_packet = MutableIpv4Packet::new(ip_slice).unwrap();
+                    if broadcast != 0 {
+                        dest.sll_addr = [255, 255, 255, 255, 255, 255, 0, 0];
+                        ip_packet.set_destination([0xff; 4].into());
+                    } else {
+                        let mut addr = [0u8; 8];
+                        addr[0..6].copy_from_slice(&mess.chaddr[0..6]);
+                        dest.sll_addr = addr;
+                        ip_packet.set_destination(mess.yiaddr);
+                    }
+                    // 设置基本字段
+                    ip_packet.set_version(IPVERSION); // 版本 IPv4
+                    ip_packet.set_header_length(5); // // 头长度 5 * 4 = 20 字节
+                    ip_packet.set_total_length(total_len as u16); // 总长度
+                    ip_packet.set_ttl(64); // 默认 TTL (IPDEFTTL)
+                    ip_packet.set_next_level_protocol(IpNextHeaderProtocols::Udp); // 协议字段
+                    ip_packet.set_source(context.serv_addr); // 源地址
+                    ip_packet.set_identification(0); // ID = 0
+                    ip_packet.set_flags(Ipv4Flags::DontFragment); // 偏移 Don't Fragment (0x4000)
+                    ip_packet.set_fragment_offset(0);
+                    ip_packet.set_dscp(0); // DSCP = 0
+                    ip_packet.set_ecn(0); // ECN = 0
+
+                    // 计算校验和
+                    ip_packet.set_checksum(0); // 先清空校验和
+                    let checksum = util::checksum(ip_packet.packet(), 30); // skipword 为跳过某个字的计算，全部计算就选择一个大点的数
+                    ip_packet.set_checksum(checksum);
+
+                    // 4. 填充 DHCP 数据
+                    {
+                        // 只复制实际接收到的数据，而不是整个packet数组
+                        dhcp_slice[..newlen as usize]
+                            .copy_from_slice(&mess.to_vec()[..newlen as usize]);
+                    }
+
+                    // 5. 填充 UDP 头部
+                    {
+                        let mut udp_packet = MutableUdpPacket::new(udp_slice).unwrap();
+
                         udp_packet.set_source(DHCP_SERVER_PORT);
                         udp_packet.set_destination(DHCP_CLIENT_PORT);
-                        udp_packet.set_length((8 + newlen as u16) as u16);
-                        udp_packet.set_payload(&packet[..newlen as usize]);
+                        udp_packet.set_length((udp_header_len + newlen as usize) as u16);
+                        udp_packet.set_checksum(0); // UDP 校验和可选，设为 0
 
-                        let _ = socket.send(&ethernet_packet.packet());
+                        // 如果需要计算 UDP 校验和（包含伪头部）
+                        // 注意：DHCP 通常使用 UDP 校验和
+                        let checksum = calculate_udp_checksum_for_dhcp(
+                            &mut udp_packet,
+                            &ip_packet.get_source(),
+                            &ip_packet.get_destination(),
+                            &dhcp_slice[..newlen as usize],
+                        );
+                        udp_packet.set_checksum(checksum);
+                    }
+
+                    let sock_addr = sockaddr_ll_to_sockaddr(&dest);
+                    if let Some(socket) = &context.rawfd {
+                        let _ = socket.send_to(&buffer, &sock_addr);
                     }
                 }
             }
         }
+    } else {
+        syslog!(LOG_ERR, "DhcpPacket parse error");
     }
 }
 
-// 计算 IPv4 数据包的校验和
-fn ipv4_checksum(packet: &MutableIpv4Packet) -> u16 {
-    let mut sum = 0u32;
+// 判断地址是否为可用地址
+pub fn address_available(context: &DhcpContext, taddr: Ipv4Addr) -> bool {
+    let start = context.start;
+    let end = context.end;
 
-    // 将 IPv4 报头数据逐个 16 位进行累加
-    for i in (0..packet.packet().len()).step_by(2) {
-        let word = ((packet.packet()[i] as u32) << 8) + packet.packet()[i + 1] as u32;
-        sum += word;
+    // 小于开始地址，大于结束地址， 在租约文件中  表示地址为不可用地址
+    if taddr < start || taddr > end || lease_find_by_addr(taddr).is_some() {
+        return false;
     }
 
-    // 把进位加回去
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-
-    // 返回反码
-    !(sum as u16)
+    true
 }
-
-// 从 DHCP 地址池中分配一个未被使用的 IPv4 地址，并将其返回给调用者
+/*
+ * 顺序分配算法：从上次分配的地址开始，逐个递增查找可用地址
+ * 循环查找：当到达地址池末尾时，回到起始位置继续查找
+ * 避免冲突：确保分配的地址不在现有租约中，也不在预留配置中
+*/
 pub fn address_allocate(
-    context: &DhcpContext,
-    config: &mut Option<Box<DhcpConfig>>,
-    addr: &mut InAddr,
-) -> bool {
-    let mut current = context.last; // 从上次分配的地址开始
-    let start = context.last; // 记录起始地址以避免死循环
-
+    context: &mut DhcpContext,
+    configs: &[DhcpConfig],
+    addrp: &mut Ipv4Addr,
+) -> Option<Ipv4Addr> {
+    let start = context.last;
+    let mut is_reserved: bool;
     loop {
-        // 如果当前地址已到达地址池末尾，则从起始地址重新开始
-        if current == context.end {
-            current = context.start;
+        if context.last == context.end {
+            // 指针指向末尾
+            context.last = context.start // 从start地址开始查找
         } else {
-            // 将当前地址递增
-            current.s_addr = current.s_addr.wrapping_add(1);
+            let ip_as_u32: u32 = u32::from(context.last);
+            let next_ip = Ipv4Addr::from(ip_as_u32 + 1); // ip地址 +1
+            context.last = next_ip;
         }
 
-        // 检查当前地址是否已被租约占用
-        if !lease_find_by_addr(current) {
-            let mut cfg = config.as_ref();
-
-            // 遍历静态配置链表
-            while let Some(c) = cfg {
-                if c.addr == current {
-                    break; // 如果地址被静态分配，跳过
+        if lease_find_by_addr(context.last).is_none() {
+            // 查找是否被占用   未被占用  执行下面代码
+            is_reserved = false;
+            // 查看是否在配置文件中预留地址
+            for config in configs.iter() {
+                if config.addr == context.last {
+                    // 是否为预留项
+                    is_reserved = true;
+                    break; // 是预留项 进行下一个ip查找
                 }
-                cfg = c.next.as_ref(); // 使用 as_ref() 来保持类型一致性
             }
 
-            // 如果未找到匹配的静态配置，地址可用
-            if cfg.is_none() {
-                *addr = current; // 将分配的地址返回
-                return true; // 分配成功
+            // 没被占用，也不在预留项中
+            if !is_reserved {
+                *addrp = context.last;
+                return Some(context.last);
             }
         }
 
-        // 如果循环回到了起始地址，说明所有地址都不可用
-        if current == start {
+        // 检查是否已经遍历完所有地址
+        if context.last == start {
             break;
         }
     }
 
-    false // 分配失败
+    None
 }
 
-// 用于检查给定的 IPv4 地址是否在 DHCP 上下文中可用
-pub fn address_available(context: &DhcpContext, addr: InAddr) -> bool {
-    // 将 IPv4 地址转换为 u32 进行比较
-    let addr_u32 = addr.s_addr;
-    let start_u32 = context.start.s_addr;
-    let end_u32 = context.end.s_addr;
-
-    // 检查地址是否在允许范围内
-    if addr_u32 < start_u32 || addr_u32 > end_u32 {
-        return false;
+// ip地址是否在指定的DHCP上下文中
+fn is_addr_in_context(context: Option<&DhcpContext>, config: Option<&DhcpConfig>) -> bool {
+    if context.is_none() {
+        return true;
     }
 
-    // 检查地址是否已存在于现有租约中
-    if lease_find_by_addr(addr) {
-        return false;
+    if let Some(conf) = config {
+        // 地址未指明
+        if conf.addr.is_unspecified() {
+            return true;
+        }
+
+        if let Some(cont) = context {
+            if conf.addr & cont.netmask == cont.start & cont.netmask {
+                return true;
+            }
+        }
     }
 
-    // 地址可用
-    true
+    false
+}
+
+pub fn find_config(
+    configs: &[DhcpConfig],
+    context: Option<&DhcpContext>,
+    clid: &[u8],
+    clid_len: usize,
+    hwaddr: [u8; 6],
+    hostname: Option<String>,
+) -> Option<DhcpConfig> {
+    if clid_len != 0 {
+        for config in configs.iter() {
+            if config.clid_len == clid_len
+                && config.clid == clid
+                && is_addr_in_context(context, Some(config))
+            {
+                return Some(config.clone());
+            }
+
+            // dhcpcd将ASCII客户端id前缀为0，这是错误的，但我们在这里尝试解决这个问题
+            // 这里应该可以优化，理解ASCII客户端id前缀为0是什么情况后再进行优化
+            if !clid.is_empty()
+                && clid[0] == 0
+                && config.clid_len == clid_len - 1
+                && clid.len() > 1
+                && config.clid.len() >= clid_len - 1
+                && clid[1..] == config.clid[..clid_len - 1]
+                && is_addr_in_context(context, Some(config))
+            {
+                return Some(config.clone());
+            }
+        }
+    }
+
+    // 硬件地址
+    for config in configs.iter() {
+        if config.hwaddr == hwaddr && is_addr_in_context(context, Some(config)) {
+            return Some(config.clone());
+        }
+    }
+
+    // 主机名
+    if let Some(host_name) = hostname {
+        for config in configs.iter() {
+            if let Some(ref c_hostname) = config.hostname {
+                if c_hostname == &host_name && is_addr_in_context(context, Some(config)) {
+                    return Some(config.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 计算 UDP 校验和（包含伪头部）
+fn calculate_udp_checksum_for_dhcp(
+    udp_packet: &mut MutableUdpPacket,
+    source_ip: &Ipv4Addr,
+    dest_ip: &Ipv4Addr,
+    data: &[u8],
+) -> u16 {
+    // 关键步骤：将 UDP 头中的校验和字段先设置为 0
+    udp_packet.set_checksum(0);
+
+    // 2. 调用 pnet 的 ipv4_checksum 函数
+    // 这个函数会自动构建伪首部，并对整个 UDP 报文（包括你的 DHCP 负载）进行计算
+    let udp_checksum = ipv4_checksum(
+        data,
+        1024,
+        udp_packet.packet(),
+        source_ip,
+        dest_ip,
+        IpNextHeaderProtocols::Udp, // 指定上层协议为 UDP (17)
+    );
+
+    udp_checksum
+}
+
+/// 将 sockaddr_ll 转换为 SockAddr
+pub fn sockaddr_ll_to_sockaddr(addr: &libc::sockaddr_ll) -> SockAddr {
+    let len = std::mem::size_of::<libc::sockaddr_ll>();
+    let mut storage = std::mem::MaybeUninit::<SockAddrStorage>::uninit();
+
+    // SAFETY: `storage` 指向一块足够大的未初始化内存；`addr` 指向有效的 `sockaddr_ll`；
+    // 复制的字节数与 `sockaddr_ll` 的实际大小一致，且两者不重叠。
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (addr as *const libc::sockaddr_ll).cast::<u8>(),
+            storage.as_mut_ptr().cast::<u8>(),
+            len,
+        );
+        SockAddr::new(storage.assume_init(), len as u32)
+    }
 }
